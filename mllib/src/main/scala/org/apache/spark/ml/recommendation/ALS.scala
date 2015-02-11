@@ -932,18 +932,23 @@ object ALS extends Logging {
       dstIds.map(dstIdToLocalIndex.apply)
     }
 
-    val inBlocks = ratingBlocks.map {
-      case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
-        (srcBlockId, (dstBlockId, srcIds, computeLocalIndices(dstIds), ratings))
-    }.groupByKey(new HashPartitioner(srcPart.numPartitions))
-        .mapValues { iter =>
-      val builder =
-        new UncompressedInBlockBuilder[ID](new LocalIndexEncoder(dstPart.numPartitions))
+    type UncompressedCols = (Int, Array[ID], Array[Int], Array[Float])
+    def toCompressedSparseCols(iter: Iterable[UncompressedCols]): InBlock[ID] = {
+      val encoder = new LocalIndexEncoder(dstPart.numPartitions)
+      val builder = new UncompressedInBlockBuilder[ID](encoder)
       iter.foreach { case (dstBlockId, srcIds, dstLocalIndices, ratings) =>
         builder.add(dstBlockId, srcIds, dstLocalIndices, ratings)
       }
       builder.build().compress()
-    }.setName(prefix + "InBlocks")
+    }
+
+    val inBlocks = ratingBlocks
+      .map{ case ((i,j), RatingBlock(srcIds, dstIds, ratings)) =>
+        (i, (j, srcIds, computeLocalIndices(dstIds), ratings))
+      }
+      .groupByKey(new HashPartitioner(srcPart.numPartitions))
+      .mapValues(toCompressedSparseCols)
+      .setName(prefix + "InBlocks")
       .persist(storageLevel)
 
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstEncodedIndices, _) =>
