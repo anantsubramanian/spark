@@ -1033,7 +1033,7 @@ object ALS extends Logging {
         }
     }
 
-    def computeNewFactors(block: InBlock[ID], factorTuples: Iterable[(Int,FactorBlock)] ): FactorBlock = {
+    def solveFactorNormalEqn(block: InBlock[ID], factorTuples: Iterable[(Int,FactorBlock)] ): FactorBlock = {
       val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
       factorTuples.foreach { case (srcBlockId, vec) =>
         sortedSrcFactors(srcBlockId) = vec
@@ -1075,7 +1075,7 @@ object ALS extends Logging {
 
     dstInBlocks
       .join(srcOut)
-      .mapValues{case (block, factorTuple) => computeNewFactors(block,factorTuple)}
+      .mapValues{case (block, factorTuple) => solveFactorNormalEqn(block,factorTuple)}
   }
 
   /**
