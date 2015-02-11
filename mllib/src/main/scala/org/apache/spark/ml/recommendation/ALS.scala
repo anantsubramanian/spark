@@ -896,33 +896,45 @@ object ALS extends Logging {
       dstPart: Partitioner,
       storageLevel: StorageLevel)(
       implicit srcOrd: Ordering[ID]): (RDD[(Int, InBlock[ID])], RDD[(Int, OutBlock)]) = {
+
+
+    // compute the local destination indices for each index i as
+    // i_local = mod(i,)
+    def computeLocalIndices(dstIds: Array[ID]): Array[Int] = {
+
+      val start = System.nanoTime()
+      val dstIdSet = new OpenHashSet[ID](1 << 20)
+      dstIds.foreach(dstIdSet.add)
+
+    // The implementation is a faster version of
+    // val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
+      val sortedDstIds = new Array[ID](dstIdSet.size)
+      var i = 0
+      var pos = dstIdSet.nextPos(0)
+      while (pos != -1) {
+        sortedDstIds(i) = dstIdSet.getValue(pos)
+        pos = dstIdSet.nextPos(pos + 1)
+        i += 1
+      }
+      assert(i == dstIdSet.size)
+      Sorting.quickSort(sortedDstIds)
+      val dstIdToLocalIndex = new OpenHashMap[ID, Int](sortedDstIds.length)
+
+      i = 0
+      while (i < sortedDstIds.length) {
+        dstIdToLocalIndex.update(sortedDstIds(i), i)
+        i += 1
+      }
+      logDebug("Converting to local indices took " 
+        + (System.nanoTime() - start) / 1e9 
+        + " seconds.")
+
+      dstIds.map(dstIdToLocalIndex.apply)
+    }
+
     val inBlocks = ratingBlocks.map {
       case ((srcBlockId, dstBlockId), RatingBlock(srcIds, dstIds, ratings)) =>
-        // The implementation is a faster version of
-        // val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
-        val start = System.nanoTime()
-        val dstIdSet = new OpenHashSet[ID](1 << 20)
-        dstIds.foreach(dstIdSet.add)
-        val sortedDstIds = new Array[ID](dstIdSet.size)
-        var i = 0
-        var pos = dstIdSet.nextPos(0)
-        while (pos != -1) {
-          sortedDstIds(i) = dstIdSet.getValue(pos)
-          pos = dstIdSet.nextPos(pos + 1)
-          i += 1
-        }
-        assert(i == dstIdSet.size)
-        Sorting.quickSort(sortedDstIds)
-        val dstIdToLocalIndex = new OpenHashMap[ID, Int](sortedDstIds.length)
-        i = 0
-        while (i < sortedDstIds.length) {
-          dstIdToLocalIndex.update(sortedDstIds(i), i)
-          i += 1
-        }
-        logDebug(
-          "Converting to local indices took " + (System.nanoTime() - start) / 1e9 + " seconds.")
-        val dstLocalIndices = dstIds.map(dstIdToLocalIndex.apply)
-        (srcBlockId, (dstBlockId, srcIds, dstLocalIndices, ratings))
+        (srcBlockId, (dstBlockId, srcIds, computeLocalIndices(dstIds), ratings))
     }.groupByKey(new HashPartitioner(srcPart.numPartitions))
         .mapValues { iter =>
       val builder =
@@ -933,6 +945,7 @@ object ALS extends Logging {
       builder.build().compress()
     }.setName(prefix + "InBlocks")
       .persist(storageLevel)
+
     val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstEncodedIndices, _) =>
       val encoder = new LocalIndexEncoder(dstPart.numPartitions)
       val activeIds = Array.fill(dstPart.numPartitions)(mutable.ArrayBuilder.make[Int])
