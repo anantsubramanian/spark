@@ -898,16 +898,18 @@ object ALS extends Logging {
       implicit srcOrd: Ordering[ID]): (RDD[(Int, InBlock[ID])], RDD[(Int, OutBlock)]) = {
 
 
-    // compute the local destination indices for each index i as
-    // i_local = mod(i,)
+    /**
+     * compute the local destination indices for each index i as
+     * i_local = mod(i,N), where N is the nu
+     */ 
     def computeLocalIndices(dstIds: Array[ID]): Array[Int] = {
 
       val start = System.nanoTime()
       val dstIdSet = new OpenHashSet[ID](1 << 20)
       dstIds.foreach(dstIdSet.add)
 
-    // The implementation is a faster version of
-    // val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
+      // The implementation is a faster version of
+      // val dstIdToLocalIndex = dstIds.toSet.toSeq.sorted.zipWithIndex.toMap
       val sortedDstIds = new Array[ID](dstIdSet.size)
       var i = 0
       var pos = dstIdSet.nextPos(0)
@@ -918,10 +920,11 @@ object ALS extends Logging {
       }
       assert(i == dstIdSet.size)
       Sorting.quickSort(sortedDstIds)
-      val dstIdToLocalIndex = new OpenHashMap[ID, Int](sortedDstIds.length)
+      val len = sortedDstIds.length
+      val dstIdToLocalIndex = new OpenHashMap[ID, Int](len)
 
       i = 0
-      while (i < sortedDstIds.length) {
+      while (i < len) {
         dstIdToLocalIndex.update(sortedDstIds(i), i)
         i += 1
       }
@@ -933,6 +936,14 @@ object ALS extends Logging {
     }
 
     type UncompressedCols = (Int, Array[ID], Array[Int], Array[Float])
+
+    def toUncompressedCols(tup: ((Int,Int), RatingBlock[ID])): (Int, UncompressedCols) = {
+      val key: (Int,Int) = tup._1
+      val block: RatingBlock[ID] = tup._2
+      val localBlockInds: Array[Int] = computeLocalIndices(block.dstIds)
+      (key._1, (key._2, block.srcIds, localBlockInds, block.ratings) ) 
+    }
+
     def toCompressedSparseCols(iter: Iterable[UncompressedCols]): InBlock[ID] = {
       val encoder = new LocalIndexEncoder(dstPart.numPartitions)
       val builder = new UncompressedInBlockBuilder[ID](encoder)
@@ -942,25 +953,16 @@ object ALS extends Logging {
       builder.build().compress()
     }
 
-    val inBlocks = ratingBlocks
-      .map{ case ((i,j), RatingBlock(srcIds, dstIds, ratings)) =>
-        (i, (j, srcIds, computeLocalIndices(dstIds), ratings))
-      }
-      .groupByKey(new HashPartitioner(srcPart.numPartitions))
-      .mapValues(toCompressedSparseCols)
-      .setName(prefix + "InBlocks")
-      .persist(storageLevel)
-
-    val outBlocks = inBlocks.mapValues { case InBlock(srcIds, dstPtrs, dstEncodedIndices, _) =>
+    def toOutLinkArray(block: InBlock[ID]): OutBlock = { 
       val encoder = new LocalIndexEncoder(dstPart.numPartitions)
       val activeIds = Array.fill(dstPart.numPartitions)(mutable.ArrayBuilder.make[Int])
       var i = 0
       val seen = new Array[Boolean](dstPart.numPartitions)
-      while (i < srcIds.length) {
-        var j = dstPtrs(i)
+      while (i < block.srcIds.length) {
+        var j = block.dstPtrs(i)
         ju.Arrays.fill(seen, false)
-        while (j < dstPtrs(i + 1)) {
-          val dstBlockId = encoder.blockId(dstEncodedIndices(j))
+        while (j < block.dstPtrs(i + 1)) {
+          val dstBlockId = encoder.blockId(block.dstEncodedIndices(j))
           if (!seen(dstBlockId)) {
             activeIds(dstBlockId) += i // add the local index in this out-block
             seen(dstBlockId) = true
@@ -972,8 +974,19 @@ object ALS extends Logging {
       activeIds.map { x =>
         x.result()
       }
-    }.setName(prefix + "OutBlocks")
+    }
+    val inBlocks = ratingBlocks
+      .map(toUncompressedCols)
+      .groupByKey(new HashPartitioner(srcPart.numPartitions))
+      .mapValues(toCompressedSparseCols)
+      .setName(prefix + "InBlocks")
       .persist(storageLevel)
+
+    val outBlocks = inBlocks
+      .mapValues(toOutLinkArray)
+      .setName(prefix + "OutBlocks")
+      .persist(storageLevel)
+
     (inBlocks, outBlocks)
   }
 
@@ -1002,48 +1015,67 @@ object ALS extends Logging {
       implicitPrefs: Boolean = false,
       alpha: Double = 1.0,
       solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = {
+
+
     val numSrcBlocks = srcFactorBlocks.partitions.length
     val YtY = if (implicitPrefs) Some(computeYtY(srcFactorBlocks, rank)) else None
-    val srcOut = srcOutBlocks.join(srcFactorBlocks).flatMap {
-      case (srcBlockId, (srcOutBlock, srcFactors)) =>
-        srcOutBlock.view.zipWithIndex.map { case (activeIndices, dstBlockId) =>
-          (dstBlockId, (srcBlockId, activeIndices.map(idx => srcFactors(idx))))
+
+    /*type BlockFacTuple = (OutBlock,FactorBlock)*/
+    def filterFactorsToSend(tup: (Int, (OutBlock, FactorBlock)) ) = {
+      val srcBlockId = tup._1
+      val block = tup._2._1
+      val factors = tup._2._2
+      block
+        .view
+        .zipWithIndex
+        .map{ case (activeIndices, dstBlockId) =>
+          (dstBlockId, (srcBlockId, activeIndices.map(factors(_))))
         }
     }
-    val merged = srcOut.groupByKey(new HashPartitioner(dstInBlocks.partitions.length))
-    dstInBlocks.join(merged).mapValues {
-      case (InBlock(dstIds, srcPtrs, srcEncodedIndices, ratings), srcFactors) =>
-        val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
-        srcFactors.foreach { case (srcBlockId, factors) =>
-          sortedSrcFactors(srcBlockId) = factors
+
+    def computeNewFactors(block: InBlock[ID], factorTuples: Iterable[(Int,FactorBlock)] ): FactorBlock = {
+      val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
+      factorTuples.foreach { case (srcBlockId, vec) =>
+        sortedSrcFactors(srcBlockId) = vec
+      }
+      val len = block.srcIds.length
+      val dstFactors = new Array[Array[Float]](len)
+      var j = 0
+      val ls = new NormalEquation(rank)
+      while (j < len) {
+        ls.reset()
+        if (implicitPrefs) {
+          ls.merge(YtY.get)
         }
-        val dstFactors = new Array[Array[Float]](dstIds.length)
-        var j = 0
-        val ls = new NormalEquation(rank)
-        while (j < dstIds.length) {
-          ls.reset()
+        var i = block.dstPtrs(j)
+        while (i < block.dstPtrs(j + 1)) {
+          val encoded = block.dstEncodedIndices(i)
+          val blockId = srcEncoder.blockId(encoded)
+          val localIndex = srcEncoder.localIndex(encoded)
+          val srcFactor = sortedSrcFactors(blockId)(localIndex)
+          val rating = block.ratings(i)
           if (implicitPrefs) {
-            ls.merge(YtY.get)
+            ls.addImplicit(srcFactor, rating, alpha)
+          } else {
+            ls.add(srcFactor, rating)
           }
-          var i = srcPtrs(j)
-          while (i < srcPtrs(j + 1)) {
-            val encoded = srcEncodedIndices(i)
-            val blockId = srcEncoder.blockId(encoded)
-            val localIndex = srcEncoder.localIndex(encoded)
-            val srcFactor = sortedSrcFactors(blockId)(localIndex)
-            val rating = ratings(i)
-            if (implicitPrefs) {
-              ls.addImplicit(srcFactor, rating, alpha)
-            } else {
-              ls.add(srcFactor, rating)
-            }
-            i += 1
-          }
-          dstFactors(j) = solver.solve(ls, regParam)
-          j += 1
+          i += 1
         }
-        dstFactors
+        dstFactors(j) = solver.solve(ls, regParam)
+        j += 1
+      }
+      dstFactors
     }
+
+    val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = 
+      srcOutBlocks
+      .join(srcFactorBlocks)
+      .flatMap(filterFactorsToSend)
+      .groupByKey(new HashPartitioner(dstInBlocks.partitions.length))
+
+    dstInBlocks
+      .join(srcOut)
+      .mapValues{case (block, factorTuple) => computeNewFactors(block,factorTuple)}
   }
 
   /**
