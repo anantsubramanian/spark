@@ -410,6 +410,248 @@ object ALS extends Logging {
   }
 
   /**
+   * Implementation of the Nonlinear Preconditioned Conjugate Gradient (PNCG) 
+   * ALS is used as a preconditioner to the standard nonlinear CG.
+   *
+   */
+
+  def trainPNCG[ID: ClassTag]( // scalastyle:ignore
+      ratings: RDD[Rating[ID]],
+      rank: Int = 10,
+      numUserBlocks: Int = 10,
+      numItemBlocks: Int = 10,
+      maxIter: Int = 10,
+      regParam: Double = 1.0,
+      implicitPrefs: Boolean = false,
+      alpha: Double = 1.0,
+      nonnegative: Boolean = false,
+      intermediateRDDStorageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK,
+      finalRDDStorageLevel: StorageLevel = StorageLevel.MEMORY_AND_DISK,
+      seed: Long = 0L)(
+      implicit ord: Ordering[ID]): (RDD[(ID, Array[Float])], RDD[(ID, Array[Float])]) = 
+  {
+    require(intermediateRDDStorageLevel != StorageLevel.NONE,
+      "ALS is not designed to run without persisting intermediate RDDs.")
+    val sc = ratings.sparkContext
+
+    val userPart = new HashPartitioner(numUserBlocks)
+    val itemPart = new HashPartitioner(numItemBlocks)
+
+    val userLocalIndexEncoder = new LocalIndexEncoder(userPart.numPartitions)
+    val itemLocalIndexEncoder = new LocalIndexEncoder(itemPart.numPartitions)
+
+    val solver = {
+      if (nonnegative) 
+        new NNLSSolver 
+      else 
+        new CholeskySolver
+    }
+
+    val blockRatings = 
+      partitionRatings(ratings, userPart, itemPart)
+      .persist(intermediateRDDStorageLevel)
+
+    val (userInBlocks, userOutBlocks) = makeBlocks("user", 
+      blockRatings, 
+      userPart, 
+      itemPart, 
+      intermediateRDDStorageLevel)
+
+    // materialize blockRatings and user blocks
+    userOutBlocks.count()
+
+    val swappedBlockRatings = blockRatings.map {
+      case ((userBlockId, itemBlockId), RatingBlock(userIds, itemIds, localRatings)) =>
+        ((itemBlockId, userBlockId), RatingBlock(itemIds, userIds, localRatings))
+    }
+    val (itemInBlocks, itemOutBlocks) = makeBlocks("item", 
+      swappedBlockRatings, 
+      itemPart, 
+      userPart, 
+      intermediateRDDStorageLevel)
+
+    // materialize item blocks
+    itemOutBlocks.count()
+
+    /* initialize the factor vectors for:
+     * user, item  -- user/item factors
+     * grad -- gradient of f(U,M)
+     * direc -- search direction
+     *
+     * variables from the last iteration have _last appended to their names
+     * the suffix _last signifies the vector from the last iteration
+     * the suffix _pc signifies an ALS-preconditioned vector
+     */
+
+    type FactorRDD = RDD[(Int,FactorBlock)]
+
+    val seedGen = new XORShiftRandom(seed)
+    var users: RDD[(Int, FactorBlock)] = initialize(userInBlocks, rank, seedGen.nextLong())
+    var items: RDD[(Int, FactorBlock)] = initialize(itemInBlocks, rank, seedGen.nextLong())
+
+    // first ALS preconditioning step
+    /*var items_pc: RDD[(Int, FactorBlock)] = computeFactors(users, */
+    /*  userOutBlocks, */
+    /*  itemInBlocks, */
+    /*  rank, */
+    /*  regParam,*/
+    /*  userLocalIndexEncoder, */
+    /*  solver = solver)*/
+
+    /*var users_pc: RDD[(Int, FactorBlock)] = computeFactors(items, */
+    /*  itemOutBlocks, */
+    /*  userInBlocks, */
+    /*  rank, */
+    /*  regParam,*/
+    /*  itemLocalIndexEncoder, */
+    /*  solver = solver)*/
+
+    def preconditionItems(u: FactorRDD): FactorRDD = 
+    {
+      computeFactors(u, 
+        userOutBlocks, 
+        itemInBlocks, 
+        rank, 
+        regParam,
+        userLocalIndexEncoder, 
+        solver = solver)
+    }
+
+    def preconditionUsers(m: FactorRDD): FactorRDD = 
+    {
+      computeFactors(m, 
+        itemOutBlocks, 
+        userInBlocks, 
+        rank, 
+        regParam,
+        itemLocalIndexEncoder, 
+        solver = solver)
+    }
+
+    /** 
+     * Compute blas.SCALE; x = a*x, and return a new factor block 
+     * @param x a vector represented as a FactorBlock
+     * @param a scalar
+     */
+    def blockSCAL(x: FactorBlock, a: Float): FactorBlock = 
+    {
+      val numVectors = x.length
+      val result = Array.ofDim[Array[Float]](numVectors)
+      Array.copy(x,0,result,0,numVectors)
+
+      var k = 0;
+      while (k < numVectors)
+      {
+        blas.sscal(rank,a,result(k),1)
+        k += 1
+      }
+      result
+    }
+
+    /** 
+     * compute scale*x + y, and return a new factor block 
+     * @param x a vector represented as a FactorBlock
+     * @param y a vector represented as a FactorBlock
+     * @param a a scalar
+     */
+    def blockAXPY(x: FactorBlock, y: FactorBlock, a: Float): FactorBlock =
+    {
+      val numVectors = x.length
+      val result: FactorBlock = Array.ofDim[Array[Float]](numVectors)
+      Array.copy(y,0,result,0,numVectors)
+
+      var k = 0;
+      while (k < numVectors)
+      {
+        blas.saxpy(rank,a,x(k),1,result(k),1)
+        k += 1
+      }
+      result
+    }
+
+    /** 
+     * Compute the gradient g = x - x_preconditioned
+     * @param x current vector
+     * @param x_pc preconditioned vector
+     */
+    def computeGradient(
+        x: RDD[(Int,FactorBlock)], 
+        x_pc: RDD[(Int,FactorBlock)]): RDD[(Int,FactorBlock)] = 
+    {
+      x.join(x_pc).mapValues{case(v1,v2) => blockAXPY(v2,v1,-1.0f)}
+    }
+
+    // run ALS preconditioner on the user/item vectors
+    var users_pc: FactorRDD = preconditionUsers(items)
+    var items_pc: FactorRDD = preconditionItems(users)
+
+    // compute gradients
+    var gradUser: FactorRDD = computeGradient(users,users_pc)
+    var gradItem: FactorRDD = computeGradient(items,items_pc)
+
+    // initial search direction
+    var direcUser: FactorRDD = gradUser.mapValues{x => blockSCAL(x,-1.0f)}
+    var direcItem: FactorRDD = gradItem.mapValues{x => blockSCAL(x,-1.0f)}
+
+    var alpha_pncg: Float = 0.0f
+    var beta_pncg: Float = 0.0f
+
+    for (iter <- 1 until maxIter) 
+    {
+      alpha_pncg = 1.0f;
+
+      beta_pncg = 1.0f;
+      /*itemFactors = computeFactors(userFactors, */
+      /*  userOutBlocks, */
+      /*  itemInBlocks, */
+      /*  rank, */
+      /*  regParam,*/
+      /*  userLocalIndexEncoder, */
+      /*  solver = solver)*/
+
+      /*userFactors = computeFactors(itemFactors, */
+      /*  itemOutBlocks, */
+      /*  userInBlocks, */
+      /*  rank, */
+      /*  regParam,*/
+      /*  itemLocalIndexEncoder, */
+      /*  solver = solver)*/
+    }
+
+    val userIdAndFactors = userInBlocks
+      .mapValues(_.srcIds)
+      .join(users)
+      .values
+      .setName("userFactors")
+      .persist(finalRDDStorageLevel)
+
+    val itemIdAndFactors = itemInBlocks
+      .mapValues(_.srcIds)
+      .join(items)
+      .values
+      .setName("itemFactors")
+      .persist(finalRDDStorageLevel)
+
+    if (finalRDDStorageLevel != StorageLevel.NONE) {
+      userIdAndFactors.count()
+      items.unpersist()
+      itemIdAndFactors.count()
+      userInBlocks.unpersist()
+      userOutBlocks.unpersist()
+      itemInBlocks.unpersist()
+      itemOutBlocks.unpersist()
+      blockRatings.unpersist()
+    }
+    val userOutput = userIdAndFactors.flatMap { case (ids, factors) =>
+      ids.view.zip(factors)
+    }
+    val itemOutput = itemIdAndFactors.flatMap { case (ids, factors) =>
+      ids.view.zip(factors)
+    }
+    (userOutput, itemOutput)
+  }
+
+  /**
    * Implementation of the ALS algorithm.
    */
   def train[ID: ClassTag]( // scalastyle:ignore
@@ -1081,9 +1323,12 @@ object ALS extends Logging {
       .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
       .groupByKey(new HashPartitioner(dstInBlocks.partitions.length))
 
-    dstInBlocks
+    val newFactors: RDD[(Int, FactorBlock)] = 
+      dstInBlocks
       .join(srcOut)
       .mapValues{case (block, factorTuple) => solveNormalEqn(block,factorTuple)}
+
+    newFactors
   }
 
   /**
