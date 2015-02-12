@@ -1016,15 +1016,20 @@ object ALS extends Logging {
       alpha: Double = 1.0,
       solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = {
 
-
     val numSrcBlocks = srcFactorBlocks.partitions.length
-    val YtY = if (implicitPrefs) Some(computeYtY(srcFactorBlocks, rank)) else None
+    val YtY = 
+      if (implicitPrefs) 
+        Some(computeYtY(srcFactorBlocks, rank)) 
+      else 
+        None
 
     /*type BlockFacTuple = (OutBlock,FactorBlock)*/
-    def filterFactorsToSend(tup: (Int, (OutBlock, FactorBlock)) ) = {
-      val srcBlockId = tup._1
-      val block = tup._2._1
-      val factors = tup._2._2
+    def filterFactorsToSend(
+        srcBlockId: Int, 
+        tup: (OutBlock, FactorBlock)) = {
+
+      val block = tup._1
+      val factors = tup._2
       block
         .view
         .zipWithIndex
@@ -1033,7 +1038,10 @@ object ALS extends Logging {
         }
     }
 
-    def solveFactorNormalEqn(block: InBlock[ID], factorTuples: Iterable[(Int,FactorBlock)] ): FactorBlock = {
+    def solveNormalEqn(
+        block: InBlock[ID], 
+        factorTuples: Iterable[(Int,FactorBlock)] ): FactorBlock = {
+
       val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
       factorTuples.foreach { case (srcBlockId, vec) =>
         sortedSrcFactors(srcBlockId) = vec
@@ -1041,11 +1049,11 @@ object ALS extends Logging {
       val len = block.srcIds.length
       val dstFactors = new Array[Array[Float]](len)
       var j = 0
-      val ls = new NormalEquation(rank)
+      val normEqn = new NormalEquation(rank)
       while (j < len) {
-        ls.reset()
+        normEqn.reset()
         if (implicitPrefs) {
-          ls.merge(YtY.get)
+          normEqn.merge(YtY.get)
         }
         var i = block.dstPtrs(j)
         while (i < block.dstPtrs(j + 1)) {
@@ -1055,13 +1063,13 @@ object ALS extends Logging {
           val srcFactor = sortedSrcFactors(blockId)(localIndex)
           val rating = block.ratings(i)
           if (implicitPrefs) {
-            ls.addImplicit(srcFactor, rating, alpha)
+            normEqn.addImplicit(srcFactor, rating, alpha)
           } else {
-            ls.add(srcFactor, rating)
+            normEqn.add(srcFactor, rating)
           }
           i += 1
         }
-        dstFactors(j) = solver.solve(ls, regParam)
+        dstFactors(j) = solver.solve(normEqn, regParam)
         j += 1
       }
       dstFactors
@@ -1070,12 +1078,12 @@ object ALS extends Logging {
     val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = 
       srcOutBlocks
       .join(srcFactorBlocks)
-      .flatMap(filterFactorsToSend)
+      .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
       .groupByKey(new HashPartitioner(dstInBlocks.partitions.length))
 
     dstInBlocks
       .join(srcOut)
-      .mapValues{case (block, factorTuple) => solveFactorNormalEqn(block,factorTuple)}
+      .mapValues{case (block, factorTuple) => solveNormalEqn(block,factorTuple)}
   }
 
   /**
