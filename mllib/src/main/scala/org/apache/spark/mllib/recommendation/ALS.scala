@@ -184,6 +184,54 @@ class ALS private (
 
   /**
    * Run ALS with the configured parameters on an input RDD of (user, product, rating) triples.
+   * Use the preconditioned nonlinear conjugate gradient (PNCG) in each iteration
+   * Returns a MatrixFactorizationModel with feature vectors for each user and product.
+   */
+  def runPNCG(ratings: RDD[Rating]): MatrixFactorizationModel = {
+    val sc = ratings.context
+
+    val numUserBlocks = if (this.numUserBlocks == -1) {
+      math.max(sc.defaultParallelism, ratings.partitions.size / 2)
+    } else {
+      this.numUserBlocks
+    }
+    val numProductBlocks = if (this.numProductBlocks == -1) {
+      math.max(sc.defaultParallelism, ratings.partitions.size / 2)
+    } else {
+      this.numProductBlocks
+    }
+
+    val (floatUserFactors, floatProdFactors) = NewALS.trainPNCG[Int](
+      ratings = ratings.map(r => NewALS.Rating(r.user, r.product, r.rating.toFloat)),
+      rank = rank,
+      numUserBlocks = numUserBlocks,
+      numItemBlocks = numProductBlocks,
+      maxIter = iterations,
+      regParam = lambda,
+      implicitPrefs = implicitPrefs,
+      alpha = alpha,
+      nonnegative = nonnegative,
+      intermediateRDDStorageLevel = intermediateRDDStorageLevel,
+      finalRDDStorageLevel = StorageLevel.NONE,
+      seed = seed)
+
+    val userFactors = floatUserFactors
+      .mapValues(_.map(_.toDouble))
+      .setName("users")
+      .persist(finalRDDStorageLevel)
+    val prodFactors = floatProdFactors
+      .mapValues(_.map(_.toDouble))
+      .setName("products")
+      .persist(finalRDDStorageLevel)
+    if (finalRDDStorageLevel != StorageLevel.NONE) {
+      userFactors.count()
+      prodFactors.count()
+    }
+    new MatrixFactorizationModel(rank, userFactors, prodFactors)
+  }
+
+  /**
+   * Run ALS with the configured parameters on an input RDD of (user, product, rating) triples.
    * Returns a MatrixFactorizationModel with feature vectors for each user and product.
    */
   def run(ratings: RDD[Rating]): MatrixFactorizationModel = {

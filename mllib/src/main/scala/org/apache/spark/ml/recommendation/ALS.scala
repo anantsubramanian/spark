@@ -473,38 +473,8 @@ object ALS extends Logging {
     // materialize item blocks
     itemOutBlocks.count()
 
-    /* initialize the factor vectors for:
-     * user, item  -- user/item factors
-     * grad -- gradient of f(U,M)
-     * direc -- search direction
-     *
-     * variables from the last iteration have _last appended to their names
-     * the suffix _last signifies the vector from the last iteration
-     * the suffix _pc signifies an ALS-preconditioned vector
-     */
 
     type FactorRDD = RDD[(Int,FactorBlock)]
-
-    val seedGen = new XORShiftRandom(seed)
-    var users: RDD[(Int, FactorBlock)] = initialize(userInBlocks, rank, seedGen.nextLong())
-    var items: RDD[(Int, FactorBlock)] = initialize(itemInBlocks, rank, seedGen.nextLong())
-
-    // first ALS preconditioning step
-    /*var items_pc: RDD[(Int, FactorBlock)] = computeFactors(users, */
-    /*  userOutBlocks, */
-    /*  itemInBlocks, */
-    /*  rank, */
-    /*  regParam,*/
-    /*  userLocalIndexEncoder, */
-    /*  solver = solver)*/
-
-    /*var users_pc: RDD[(Int, FactorBlock)] = computeFactors(items, */
-    /*  itemOutBlocks, */
-    /*  userInBlocks, */
-    /*  rank, */
-    /*  regParam,*/
-    /*  itemLocalIndexEncoder, */
-    /*  solver = solver)*/
 
     def preconditionItems(u: FactorRDD): FactorRDD = 
     {
@@ -549,7 +519,31 @@ object ALS extends Logging {
     }
 
     /** 
-     * compute scale*x + y, and return a new factor block 
+     * compute a*x + b*y, and return a new factor block 
+     * @param x a vector represented as a FactorBlock
+     * @param y a vector represented as a FactorBlock
+     * @param a a scalar
+     */
+    def blockAXPBY(x: FactorBlock, y: FactorBlock, a: Float, b: Float): FactorBlock =
+    {
+      val numVectors = x.length
+      val result: FactorBlock = Array.ofDim[Array[Float]](numVectors)
+      Array.copy(y,0,result,0,numVectors)
+
+      var k = 0;
+      while (k < numVectors)
+      {
+        //first scale b*y
+        blas.sscal(rank,b,result(k),1)
+        //y := a*x + (b*y)
+        blas.saxpy(rank,a,x(k),1,result(k),1)
+        k += 1
+      }
+      result
+    }
+
+    /** 
+     * compute a*x + y, and return a new factor block 
      * @param x a vector represented as a FactorBlock
      * @param y a vector represented as a FactorBlock
      * @param a a scalar
@@ -560,7 +554,7 @@ object ALS extends Logging {
       val result: FactorBlock = Array.ofDim[Array[Float]](numVectors)
       Array.copy(y,0,result,0,numVectors)
 
-      var k = 0;
+      var k = 0
       while (k < numVectors)
       {
         blas.saxpy(rank,a,x(k),1,result(k),1)
@@ -570,16 +564,101 @@ object ALS extends Logging {
     }
 
     /** 
+     * compute x dot y, and return a scalar
+     * @param x a vector represented as a FactorBlock
+     * @param y a vector represented as a FactorBlock
+     */
+    def blockDOT(x: FactorBlock, y: FactorBlock): Float = 
+    {
+      val numVectors = x.length
+      var result: Float = 0.0f
+      var k = 0
+      while (k < numVectors)
+      {
+        result += blas.sdot(rank,x(k),1,y(k),1)
+        k += 1
+      }
+      result
+    }
+
+    /** 
+     * compute x dot x, and return a scalar
+     * @param x a vector represented as a FactorBlock
+     */
+    def blockNRMSQR(x: FactorBlock): Float = 
+    {
+      val numVectors = x.length
+      var result: Float = 0.0f
+      var norm: Float = 0.0f
+      var k = 0
+      while (k < numVectors)
+      {
+        norm = blas.snrm2(rank,x(k),1)
+        result += norm * norm
+        k += 1
+      }
+      result
+    }
+
+    def rddDOT(xs: FactorRDD, ys: FactorRDD): Float = {
+      xs.join(ys)
+        .map{case (_,(x,y)) => blockDOT(x,y)}
+        .reduce{_+_}
+    }
+
+    def rddNORMSQR(xs: FactorRDD): Float = {
+      xs.map{case (_,x) => blockNRMSQR(x)}
+        .reduce(_+_)
+    }
+
+    def rddNORM2(xs: FactorRDD): Float = {
+      math.sqrt(rddNORMSQR(xs).toDouble).toFloat
+    }
+
+    /** 
+     * compute a*x + b*y, for a FactorRDD = RDD[(Int, FactorBlock)]
+     * @param x an RDD of vectors represented as a FactorBlock
+     * @param y an RDD of vectors represented as a FactorBlock
+     * @param a a scalar
+     * @param b a scalar
+     */
+    def rddAXPBY(x: FactorRDD, y: FactorRDD, a: Float, b: Float): FactorRDD = {
+      x.join(y).mapValues{case(xblock,yblock) => blockAXPBY(xblock,yblock,a,b)}
+    }
+
+    /** 
+     * compute a*x + y, for a FactorRDD = RDD[(Int, FactorBlock)]
+     * @param x an RDD of vectors represented as a FactorBlock
+     * @param y an RDD of vectors represented as a FactorBlock
+     * @param a a scalar
+     */
+    def rddAXPY(x: FactorRDD, y: FactorRDD, a: Float): FactorRDD = {
+      x.join(y).mapValues{case(xblock,yblock) => blockAXPY(xblock,yblock,a)}
+    }
+
+    /** 
      * Compute the gradient g = x - x_preconditioned
      * @param x current vector
      * @param x_pc preconditioned vector
      */
-    def computeGradient(
-        x: RDD[(Int,FactorBlock)], 
-        x_pc: RDD[(Int,FactorBlock)]): RDD[(Int,FactorBlock)] = 
-    {
+    def computeGradient(x: FactorRDD, x_pc: FactorRDD): FactorRDD = {
       x.join(x_pc).mapValues{case(v1,v2) => blockAXPY(v2,v1,-1.0f)}
     }
+
+    
+    /* initialize the factor vectors for:
+     * user, item  -- user/item factors
+     * grad -- gradient of f(U,M)
+     * direc -- search direction
+     *
+     * the suffix _old signifies the vector from the previous iteration
+     * the suffix _pc signifies an ALS-preconditioned vector
+     */
+
+    // generate initial factor vectors
+    val seedGen = new XORShiftRandom(seed)
+    var users: FactorRDD = initialize(userInBlocks, rank, seedGen.nextLong())
+    var items: FactorRDD = initialize(itemInBlocks, rank, seedGen.nextLong())
 
     // run ALS preconditioner on the user/item vectors
     var users_pc: FactorRDD = preconditionUsers(items)
@@ -589,7 +668,11 @@ object ALS extends Logging {
     var gradUser: FactorRDD = computeGradient(users,users_pc)
     var gradItem: FactorRDD = computeGradient(items,items_pc)
 
-    // initial search direction
+    // initialize variables for the previous iteration's gradients
+    var gradUser_old: FactorRDD = gradUser
+    var gradItem_old: FactorRDD = gradItem
+
+    // initial search direction to -gradient (steepest descent direction)
     var direcUser: FactorRDD = gradUser.mapValues{x => blockSCAL(x,-1.0f)}
     var direcItem: FactorRDD = gradItem.mapValues{x => blockSCAL(x,-1.0f)}
 
@@ -598,24 +681,35 @@ object ALS extends Logging {
 
     for (iter <- 1 until maxIter) 
     {
-      alpha_pncg = 1.0f;
+      gradUser_old = gradUser
+      gradItem_old = gradItem
+      /*direcUser_old = direcUser*/
+      /*direcItem_old = direcItem*/
+      /*direcUser = */
+      /*direcItem = */
 
-      beta_pncg = 1.0f;
-      /*itemFactors = computeFactors(userFactors, */
-      /*  userOutBlocks, */
-      /*  itemInBlocks, */
-      /*  rank, */
-      /*  regParam,*/
-      /*  userLocalIndexEncoder, */
-      /*  solver = solver)*/
+      //ecompute alpha from linesearch()
+      alpha_pncg = 1.0f; 
 
-      /*userFactors = computeFactors(itemFactors, */
-      /*  itemOutBlocks, */
-      /*  userInBlocks, */
-      /*  rank, */
-      /*  regParam,*/
-      /*  itemLocalIndexEncoder, */
-      /*  solver = solver)*/
+      //update x_k+1 = x_k + alpha * p_k
+      users = rddAXPY(direcUser, users, alpha_pncg)
+      items = rddAXPY(direcItem, items, alpha_pncg)
+
+      //precondition
+      users_pc = preconditionUsers(items)
+      items_pc = preconditionItems(users)
+
+      // compute gradients
+      gradUser = computeGradient(users,users_pc)
+      gradItem = computeGradient(items,items_pc)
+
+      // compute conjugate gradient beta parameter
+      beta_pncg = 
+        (rddNORMSQR(gradUser) + rddNORMSQR(gradItem)) / 
+        (rddNORMSQR(gradUser_old) + rddNORMSQR(gradItem_old))
+
+      direcUser = rddAXPBY(gradUser,direcUser,-1.0f,beta_pncg)
+      direcItem = rddAXPBY(gradItem,direcItem,-1.0f,beta_pncg)
     }
 
     val userIdAndFactors = userInBlocks
