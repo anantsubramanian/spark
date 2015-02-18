@@ -312,6 +312,24 @@ object ALS {
     new ALS(blocks, blocks, rank, iterations, lambda, false, 1.0, seed).run(ratings)
   }
 
+  def trainPNCG(
+      ratings: RDD[Rating],
+      rank: Int,
+      iterations: Int,
+      lambda: Double,
+      blocks: Int): MatrixFactorizationModel = 
+  {
+    new ALS(
+      blocks, 
+      blocks, 
+      rank, 
+      iterations, 
+      lambda, 
+      false, 
+      1.0)
+      .runPNCG(ratings)
+  }
+
   /**
    * Train a matrix factorization model given an RDD of ratings given by users to some products,
    * in the form of (userID, productID, rating) pairs. We approximate the ratings matrix as the

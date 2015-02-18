@@ -27,7 +27,7 @@ import org.jblas.DoubleMatrix
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.storage.StorageLevel
 
-object ALSSuite {
+object PNCGSuite {
 
   def generateRatingsAsJavaList(
       users: Int,
@@ -84,43 +84,46 @@ object ALSSuite {
 }
 
 
-class ALSSuite extends FunSuite with MLlibTestSparkContext {
+class PNCGSuite extends FunSuite with MLlibTestSparkContext {
 
-  test("rank-1 matrices") {
-    testALS(50, 100, 1, 15, 0.7, 0.3)
-  }
+  /*test("teeny-tiny rank-1 matrix") {*/
+  /*  testALS(3, 5, 1, 15, 0.7, 0.3) }*/
 
-  test("rank-1 matrices bulk") {
-    testALS(50, 100, 1, 15, 0.7, 0.3, false, true)
-  }
+  /*test("rank-1 matrices") {*/
+  /*  testALS(50, 100, 1, 15, 0.7, 0.3) }*/
+
+  /*test("rank-1 matrices bulk") {*/
+  /*  testALS(50, 100, 1, 15, 0.7, 0.3, false, true)*/
+  /*}*/
 
   test("rank-2 matrices") {
     testALS(100, 200, 2, 15, 0.7, 0.3)
   }
 
-  test("rank-2 matrices bulk") {
-    testALS(100, 200, 2, 15, 0.7, 0.3, false, true)
-  }
+  /*test("rank-2 matrices bulk") {*/
+  /*  testALS(100, 200, 2, 15, 0.7, 0.3, false, true)*/
+  /*}*/
 
-  test("rank-1 matrices implicit") {
-    testALS(80, 160, 1, 15, 0.7, 0.4, true)
-  }
+  // implicit is currently not supported
+  /*test("rank-1 matrices implicit") {*/
+  /*  testALS(80, 160, 1, 15, 0.7, 0.4, true)*/
+  /*}*/
 
-  test("rank-1 matrices implicit bulk") {
-    testALS(80, 160, 1, 15, 0.7, 0.4, true, true)
-  }
+  /*test("rank-1 matrices implicit bulk") {*/
+  /*  testALS(80, 160, 1, 15, 0.7, 0.4, true, true)*/
+  /*}*/
 
-  test("rank-2 matrices implicit") {
-    testALS(100, 200, 2, 15, 0.7, 0.4, true)
-  }
+  /*test("rank-2 matrices implicit") {*/
+  /*  testALS(100, 200, 2, 15, 0.7, 0.4, true)*/
+  /*}*/
 
-  test("rank-2 matrices implicit bulk") {
-    testALS(100, 200, 2, 15, 0.7, 0.4, true, true)
-  }
+  /*test("rank-2 matrices implicit bulk") {*/
+  /*  testALS(100, 200, 2, 15, 0.7, 0.4, true, true)*/
+  /*}*/
 
-  test("rank-2 matrices implicit negative") {
-    testALS(100, 200, 2, 15, 0.7, 0.4, true, false, true)
-  }
+  /*test("rank-2 matrices implicit negative") {*/
+  /*  testALS(100, 200, 2, 15, 0.7, 0.4, true, false, true)*/
+  /*}*/
 
   test("rank-2 matrices with different user and product blocks") {
     testALS(100, 200, 2, 15, 0.7, 0.4, numUserBlocks = 4, numProductBlocks = 2)

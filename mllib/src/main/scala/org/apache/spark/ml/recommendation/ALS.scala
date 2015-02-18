@@ -220,6 +220,24 @@ class ALS extends Estimator[ALSModel] with ALSParams {
     model
   }
 
+  /*def fitPNCG(dataset: DataFrame, paramMap: ParamMap): ALSModel = {*/
+  def fitPNCG(dataset: DataFrame): ALSModel = {
+    /*val map = this.paramMap ++ paramMap*/
+    val map = this.paramMap 
+    val ratings = dataset
+      .select(col(map(userCol)), col(map(itemCol)), col(map(ratingCol)).cast(FloatType))
+      .map { row =>
+        Rating(row.getInt(0), row.getInt(1), row.getFloat(2))
+      }
+    val (userFactors, itemFactors) = ALS.trainPNCG(ratings, rank = map(rank),
+      numUserBlocks = map(numUserBlocks), numItemBlocks = map(numItemBlocks),
+      maxIter = map(maxIter), regParam = map(regParam), implicitPrefs = map(implicitPrefs),
+      alpha = map(alpha), nonnegative = map(nonnegative))
+    val model = new ALSModel(this, map, map(rank), userFactors, itemFactors)
+    Params.inheritValues(map, this, model)
+    model
+  }
+
   override private[ml] def transformSchema(schema: StructType, paramMap: ParamMap): StructType = {
     validateAndTransformSchema(schema, paramMap)
   }
@@ -244,6 +262,11 @@ object ALS extends Logging {
     /** Solves a least squares problem (possibly with other constraints). */
     def solve(ne: NormalEquation, lambda: Double): Array[Float]
   }
+  private def logStdout(msg: String): Unit = {
+		val time: Long = System.currentTimeMillis/1000;
+		logInfo(msg);
+		println(time + ": " + msg);
+	}
 
   /** Cholesky solver for least square problems. */
   private[recommendation] class CholeskySolver extends LeastSquaresNESolver {
@@ -600,17 +623,31 @@ object ALS extends Logging {
       result
     }
 
+    /** 
+     * compute dot product, and return a scalar
+     * @param xs RDD of FactorBlocks
+     * @param ys RDD of FactorBlocks
+     */
     def rddDOT(xs: FactorRDD, ys: FactorRDD): Float = {
       xs.join(ys)
         .map{case (_,(x,y)) => blockDOT(x,y)}
         .reduce{_+_}
     }
 
+
+    /** 
+     * compute x dot x, and return a scalar
+     * @param xs RDD of FactorBlocks
+     */
     def rddNORMSQR(xs: FactorRDD): Float = {
       xs.map{case (_,x) => blockNRMSQR(x)}
         .reduce(_+_)
     }
 
+    /** 
+     * compute 2-norm of an RDD of FactorBlocks
+     * @param xs RDD of FactorBlocks
+     */
     def rddNORM2(xs: FactorRDD): Float = {
       math.sqrt(rddNORMSQR(xs).toDouble).toFloat
     }
@@ -634,6 +671,7 @@ object ALS extends Logging {
      */
     def rddAXPY(x: FactorRDD, y: FactorRDD, a: Float): FactorRDD = {
       x.join(y).mapValues{case(xblock,yblock) => blockAXPY(xblock,yblock,a)}
+      /*x.join(y).mapValues{case(xblock,yblock) => xblock}*/
     }
 
     /** 
@@ -641,10 +679,26 @@ object ALS extends Logging {
      * @param x current vector
      * @param x_pc preconditioned vector
      */
-    def computeGradient(x: FactorRDD, x_pc: FactorRDD): FactorRDD = {
-      x.join(x_pc).mapValues{case(v1,v2) => blockAXPY(v2,v1,-1.0f)}
-    }
+    /*def computeGradient(x: FactorRDD, x_pc: FactorRDD): FactorRDD = {*/
+    /*  x.join(x_pc).mapValues{case(v1,v2) => blockAXPY(v2,v1,-1.0f)}*/
+    /*}*/
 
+    /**
+     * todo: backtracking linesearch 
+     */
+    def backtrackLinesearch(
+        usr: FactorRDD, 
+        mov: FactorRDD, 
+        udirec: FactorRDD,
+        mdirec: FactorRDD,
+        c: Float, 
+        m: Float, 
+        alpha0: Float): Float = 
+    {
+      val t: Float = -c * m
+      var alpha_ls = alpha0
+      alpha_ls
+    }
     
     /* initialize the factor vectors for:
      * user, item  -- user/item factors
@@ -664,9 +718,13 @@ object ALS extends Logging {
     var users_pc: FactorRDD = preconditionUsers(items)
     var items_pc: FactorRDD = preconditionItems(users)
 
-    // compute gradients
-    var gradUser: FactorRDD = computeGradient(users,users_pc)
-    var gradItem: FactorRDD = computeGradient(items,items_pc)
+    // compute gradients; g = x - x_pc
+    var gradUser: FactorRDD = rddAXPY(users_pc,users,-1.0f)
+    var gradItem: FactorRDD = rddAXPY(items_pc,items,-1.0f)
+    /*var gradUser: FactorRDD = computeGradient(users,users_pc)*/
+    /*var gradItem: FactorRDD = computeGradient(items,items_pc)*/
+    /*gradUser.count()*/
+    /*gradItem.count()*/
 
     // initialize variables for the previous iteration's gradients
     var gradUser_old: FactorRDD = gradUser
@@ -675,41 +733,87 @@ object ALS extends Logging {
     // initial search direction to -gradient (steepest descent direction)
     var direcUser: FactorRDD = gradUser.mapValues{x => blockSCAL(x,-1.0f)}
     var direcItem: FactorRDD = gradItem.mapValues{x => blockSCAL(x,-1.0f)}
+    logStdout("Materializing directions")
+    direcUser.count()
+    direcItem.count()
 
     var alpha_pncg: Float = 0.0f
     var beta_pncg: Float = 0.0f
 
-    for (iter <- 1 until maxIter) 
+    // compute g^T * g
+    var gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
+    var gradTgrad_old = 0.0f;
+    logStdout("<g,g> = " + gradTgrad)
+
+    //materialize rdds
+    /*gradUser.count()*/
+    /*gradItem.count()*/
+
+    logStdout("Starting iteration loop")
+    for (iter <- 0 until maxIter) 
     {
+      logStdout("iter " + iter)
+      // store old preconditioned gradient vectors for computing \beta
+      gradTgrad_old = gradTgrad
+      gradUser_old.unpersist()
+      gradItem_old.unpersist()
       gradUser_old = gradUser
       gradItem_old = gradItem
-      /*direcUser_old = direcUser*/
-      /*direcItem_old = direcItem*/
-      /*direcUser = */
-      /*direcItem = */
+      gradUser_old.count()
+      gradItem_old.count()
 
       //ecompute alpha from linesearch()
       alpha_pncg = 1.0f; 
+      logStdout("alpha = " + alpha_pncg)
 
-      //update x_k+1 = x_k + alpha * p_k
+
+      // x_{k+1} = x_k + \alpha * p_k
+      /*users.count()*/
+      /*items.count()*/
+      logStdout("Updating x_{k+1} = x_k + alpha * p_k")
       users = rddAXPY(direcUser, users, alpha_pncg)
       items = rddAXPY(direcItem, items, alpha_pncg)
+      /*users.count()*/
+      /*items.count()*/
 
-      //precondition
+      // precondition x with ALS
+      // \bar{x} = P * \x_{k+1}
+      logStdout("Updating ~x = P*x_{k+1}")
       users_pc = preconditionUsers(items)
       items_pc = preconditionItems(users)
+      logStdout("Materializing x,~x")
+      users_pc.count()
+      items_pc.count()
+      users.count()
+      items.count()
 
       // compute gradients
-      gradUser = computeGradient(users,users_pc)
-      gradItem = computeGradient(items,items_pc)
+      // g = x_{k+1} - \bar{x} 
+      /*gradUser = computeGradient(users,users_pc)*/
+      gradUser = rddAXPY(users_pc,users,-1.0f) // x - x_pc
+      gradItem = rddAXPY(items_pc,items,-1.0f) // x - x_pc
+      /*gradItem = computeGradient(items,items_pc)*/
+      logStdout("Materializing g = x - ~x")
+      gradUser.count()
+      gradItem.count()
 
       // compute conjugate gradient beta parameter
-      beta_pncg = 
-        (rddNORMSQR(gradUser) + rddNORMSQR(gradItem)) / 
-        (rddNORMSQR(gradUser_old) + rddNORMSQR(gradItem_old))
+      gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
+      logStdout("<g,g> = " + gradTgrad)
+      beta_pncg = gradTgrad / gradTgrad_old
+      logStdout("beta = " + beta_pncg)
+      /*gradUser_old.unpersist()*/
+      /*gradItem_old.unpersist()*/
 
+      // p_{k+1} = g - \beta * p_k
+      /*direcUser.count()*/
+      logStdout("Updating p_{k+1} = g - beta * p_k")
       direcUser = rddAXPBY(gradUser,direcUser,-1.0f,beta_pncg)
+      direcUser.count()
+
+      /*direcItem.count()*/
       direcItem = rddAXPBY(gradItem,direcItem,-1.0f,beta_pncg)
+      direcItem.count()
     }
 
     val userIdAndFactors = userInBlocks
@@ -1376,10 +1480,10 @@ object ALS extends Logging {
 
     def solveNormalEqn(
         block: InBlock[ID], 
-        factorTuples: Iterable[(Int,FactorBlock)] ): FactorBlock = {
+        factorList: Iterable[(Int,FactorBlock)] ): FactorBlock = {
 
       val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
-      factorTuples.foreach { case (srcBlockId, vec) =>
+      factorList.foreach { case (srcBlockId, vec) =>
         sortedSrcFactors(srcBlockId) = vec
       }
       val len = block.srcIds.length
