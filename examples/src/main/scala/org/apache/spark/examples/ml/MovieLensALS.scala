@@ -154,7 +154,27 @@ object MovieLensALS {
         }
       }.mean()
     val rmse = math.sqrt(mse)
-    println(s"Test RMSE = $rmse.")
+    println(s"Regular ALS Test RMSE = $rmse.")
+
+    println(s"Repeating with trainPNCG()")
+    val pncgModel = als.fitPNCG(training)
+
+    val pncgPredictions = pncgModel.transform(test).cache()
+
+    // Evaluate the model.
+    // TODO: Create an evaluator to compute RMSE.
+    val pncg_mse = pncgPredictions.select("rating", "prediction").rdd
+      .flatMap { case Row(rating: Float, prediction: Float) =>
+        val err = rating.toDouble - prediction
+        val err2 = err * err
+        if (err2.isNaN) {
+          None
+        } else {
+          Some(err2)
+        }
+      }.mean()
+    val pncg_rmse = math.sqrt(pncg_mse)
+    println(s"Test RMSE = $pncg_rmse.")
 
     // Inspect false positives.
     predictions.registerTempTable("prediction")

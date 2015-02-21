@@ -768,30 +768,28 @@ object ALS extends Logging {
 
 
       // x_{k+1} = x_k + \alpha * p_k
-      /*users.count()*/
-      /*items.count()*/
       logStdout("Updating x_{k+1} = x_k + alpha * p_k")
-      users = rddAXPY(direcUser, users, alpha_pncg)
-      items = rddAXPY(direcItem, items, alpha_pncg)
+      users = rddAXPY(direcUser, users, alpha_pncg).cache()
+      items = rddAXPY(direcItem, items, alpha_pncg).cache()
       /*users.count()*/
       /*items.count()*/
 
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
       logStdout("Updating ~x = P*x_{k+1}")
-      users_pc = preconditionUsers(items)
-      items_pc = preconditionItems(users)
+      users_pc = preconditionUsers(items).cache()
+      items_pc = preconditionItems(users).cache()
       logStdout("Materializing x,~x")
-      users_pc.count()
-      items_pc.count()
-      users.count()
-      items.count()
+      /*users_pc.count()*/
+      /*items_pc.count()*/
+      /*users.count()*/
+      /*items.count()*/
 
       // compute gradients
       // g = x_{k+1} - \bar{x} 
       /*gradUser = computeGradient(users,users_pc)*/
-      gradUser = rddAXPY(users_pc,users,-1.0f) // x - x_pc
-      gradItem = rddAXPY(items_pc,items,-1.0f) // x - x_pc
+      gradUser = rddAXPY(users_pc,users,-1.0f).cache() // x - x_pc
+      gradItem = rddAXPY(items_pc,items,-1.0f).cache() // x - x_pc
       /*gradItem = computeGradient(items,items_pc)*/
       logStdout("Materializing g = x - ~x")
       gradUser.count()
@@ -808,11 +806,11 @@ object ALS extends Logging {
       // p_{k+1} = g - \beta * p_k
       /*direcUser.count()*/
       logStdout("Updating p_{k+1} = g - beta * p_k")
-      direcUser = rddAXPBY(gradUser,direcUser,-1.0f,beta_pncg)
+      direcUser = rddAXPBY(gradUser,direcUser,-1.0f,beta_pncg).cache()
       direcUser.count()
 
       /*direcItem.count()*/
-      direcItem = rddAXPBY(gradItem,direcItem,-1.0f,beta_pncg)
+      direcItem = rddAXPBY(gradItem,direcItem,-1.0f,beta_pncg).cache()
       direcItem.count()
     }
 
