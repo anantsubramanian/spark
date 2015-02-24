@@ -1429,6 +1429,105 @@ object ALS extends Logging {
   }
 
   /**
+   * Evaluate the cost function f(), as in \cite{Zhou2008Largescale}
+   *
+   * @param srcFactorBlocks src factors
+   * @param srcOutBlocks src out-blocks
+   * @param dstInBlocks dst in-blocks
+   * @param rank rank
+   * @param regParam regularization constant
+   * @param srcEncoder encoder for src local indices
+   * @param implicitPrefs whether to use implicit preference
+   * @param alpha the alpha constant in the implicit preference formulation
+   * @param solver solver for least squares problems
+   *
+   * @return dst factors
+   */
+  private def evalCostFunction[ID](
+      srcFactorBlocks: RDD[(Int, FactorBlock)],
+      srcOutBlocks: RDD[(Int, OutBlock)],
+      dstInBlocks: RDD[(Int, InBlock[ID])],
+      rank: Int,
+      regParam: Double,
+      srcEncoder: LocalIndexEncoder,
+      implicitPrefs: Boolean = false,
+      alpha: Double = 1.0,
+      solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = {
+
+    val numSrcBlocks = srcFactorBlocks.partitions.length
+    val YtY = 
+      if (implicitPrefs) 
+        Some(computeYtY(srcFactorBlocks, rank)) 
+      else 
+        None
+
+    /*type BlockFacTuple = (OutBlock,FactorBlock)*/
+    def filterFactorsToSend(
+        srcBlockId: Int, 
+        tup: (OutBlock, FactorBlock)) = {
+
+      val block = tup._1
+      val factors = tup._2
+      block
+        .view
+        .zipWithIndex
+        .map{ case (activeIndices, dstBlockId) =>
+          (dstBlockId, (srcBlockId, activeIndices.map(factors(_))))
+        }
+    }
+
+    def solveNormalEqn(
+        block: InBlock[ID], 
+        factorList: Iterable[(Int,FactorBlock)] ): FactorBlock = {
+
+      val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
+      factorList.foreach { case (srcBlockId, vec) =>
+        sortedSrcFactors(srcBlockId) = vec
+      }
+      val len = block.srcIds.length
+      val dstFactors = new Array[Array[Float]](len)
+      var j = 0
+      val normEqn = new NormalEquation(rank)
+      while (j < len) {
+        normEqn.reset()
+        if (implicitPrefs) {
+          normEqn.merge(YtY.get)
+        }
+        var i = block.dstPtrs(j)
+        while (i < block.dstPtrs(j + 1)) {
+          val encoded = block.dstEncodedIndices(i)
+          val blockId = srcEncoder.blockId(encoded)
+          val localIndex = srcEncoder.localIndex(encoded)
+          val srcFactor = sortedSrcFactors(blockId)(localIndex)
+          val rating = block.ratings(i)
+          if (implicitPrefs) {
+            normEqn.addImplicit(srcFactor, rating, alpha)
+          } else {
+            normEqn.add(srcFactor, rating)
+          }
+          i += 1
+        }
+        dstFactors(j) = solver.solve(normEqn, regParam)
+        j += 1
+      }
+      dstFactors
+    }
+
+    val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = 
+      srcOutBlocks
+      .join(srcFactorBlocks)
+      .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
+      .groupByKey(new HashPartitioner(dstInBlocks.partitions.length))
+
+    val newFactors: RDD[(Int, FactorBlock)] = 
+      dstInBlocks
+      .join(srcOut)
+      .mapValues{case (block, factorTuple) => solveNormalEqn(block,factorTuple)}
+
+    newFactors
+  }
+
+  /**
    * Compute dst factors by constructing and solving least square problems.
    *
    * @param srcFactorBlocks src factors
