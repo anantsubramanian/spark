@@ -249,7 +249,16 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
   conf.set("spark.executor.id", SparkContext.DRIVER_IDENTIFIER)
 
   // Create the Spark execution environment (cache, map output tracker, etc)
-  private[spark] val env = SparkEnv.createDriverEnv(conf, isLocal, listenerBus)
+
+  // This function allows components created by SparkEnv to be mocked in unit tests:
+  private[spark] def createSparkEnv(
+      conf: SparkConf,
+      isLocal: Boolean,
+      listenerBus: LiveListenerBus): SparkEnv = {
+    SparkEnv.createDriverEnv(conf, isLocal, listenerBus)
+  }
+
+  private[spark] val env = createSparkEnv(conf, isLocal, listenerBus)
   SparkEnv.set(env)
 
   // Used to store a URL for each static file/jar together with the file's local timestamp
@@ -539,6 +548,8 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
    * @note Parallelize acts lazily. If `seq` is a mutable collection and is altered after the call
    * to parallelize and before the first action on the RDD, the resultant RDD will reflect the
    * modified collection. Pass a copy of the argument to avoid this.
+   * @note avoid using `parallelize(Seq())` to create an empty `RDD`. Consider `emptyRDD` for an
+   * RDD with no partitions, or `parallelize(Seq[T]())` for an RDD of `T` with empty partitions.
    */
   def parallelize[T: ClassTag](seq: Seq[T], numSlices: Int = defaultParallelism): RDD[T] = {
     assertNotStopped()
@@ -952,11 +963,18 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
   }
 
   /** Build the union of a list of RDDs. */
-  def union[T: ClassTag](rdds: Seq[RDD[T]]): RDD[T] = new UnionRDD(this, rdds)
+  def union[T: ClassTag](rdds: Seq[RDD[T]]): RDD[T] = {
+    val partitioners = rdds.flatMap(_.partitioner).toSet
+    if (partitioners.size == 1) {
+      new PartitionerAwareUnionRDD(this, rdds)
+    } else {
+      new UnionRDD(this, rdds)
+    }
+  }
 
   /** Build the union of a list of RDDs passed as variable-length arguments. */
   def union[T: ClassTag](first: RDD[T], rest: RDD[T]*): RDD[T] =
-    new UnionRDD(this, Seq(first) ++ rest)
+    union(Seq(first) ++ rest)
 
   /** Get an RDD that has no partitions or elements. */
   def emptyRDD[T: ClassTag] = new EmptyRDD[T](this)
@@ -968,7 +986,11 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
    * values to using the `+=` method. Only the driver can access the accumulator's `value`.
    */
   def accumulator[T](initialValue: T)(implicit param: AccumulatorParam[T]) =
-    new Accumulator(initialValue, param)
+  {
+    val acc = new Accumulator(initialValue, param)
+    cleaner.foreach(_.registerAccumulatorForCleanup(acc))
+    acc
+  }
 
   /**
    * Create an [[org.apache.spark.Accumulator]] variable of a given type, with a name for display
@@ -976,7 +998,9 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
    * driver can access the accumulator's `value`.
    */
   def accumulator[T](initialValue: T, name: String)(implicit param: AccumulatorParam[T]) = {
-    new Accumulator(initialValue, param, Some(name))
+    val acc = new Accumulator(initialValue, param, Some(name))
+    cleaner.foreach(_.registerAccumulatorForCleanup(acc))
+    acc
   }
 
   /**
@@ -985,8 +1009,11 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
    * @tparam R accumulator result type
    * @tparam T type that can be added to the accumulator
    */
-  def accumulable[R, T](initialValue: R)(implicit param: AccumulableParam[R, T]) =
-    new Accumulable(initialValue, param)
+  def accumulable[R, T](initialValue: R)(implicit param: AccumulableParam[R, T]) = {
+    val acc = new Accumulable(initialValue, param)
+    cleaner.foreach(_.registerAccumulatorForCleanup(acc))
+    acc
+  }
 
   /**
    * Create an [[org.apache.spark.Accumulable]] shared variable, with a name for display in the
@@ -995,8 +1022,11 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
    * @tparam R accumulator result type
    * @tparam T type that can be added to the accumulator
    */
-  def accumulable[R, T](initialValue: R, name: String)(implicit param: AccumulableParam[R, T]) =
-    new Accumulable(initialValue, param, Some(name))
+  def accumulable[R, T](initialValue: R, name: String)(implicit param: AccumulableParam[R, T]) = {
+    val acc = new Accumulable(initialValue, param, Some(name))
+    cleaner.foreach(_.registerAccumulatorForCleanup(acc))
+    acc
+  }
 
   /**
    * Create an accumulator from a "mutable collection" type.
@@ -1007,7 +1037,9 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
   def accumulableCollection[R <% Growable[T] with TraversableOnce[T] with Serializable: ClassTag, T]
       (initialValue: R): Accumulable[R, T] = {
     val param = new GrowableAccumulableParam[R,T]
-    new Accumulable(initialValue, param)
+    val acc = new Accumulable(initialValue, param)
+    cleaner.foreach(_.registerAccumulatorForCleanup(acc))
+    acc
   }
 
   /**
@@ -1354,6 +1386,7 @@ class SparkContext(config: SparkConf) extends Logging with ExecutorAllocationCli
         cleaner.foreach(_.stop())
         dagScheduler.stop()
         dagScheduler = null
+        progressBar.foreach(_.stop())
         taskScheduler = null
         // TODO: Cache.stop()?
         env.stop()

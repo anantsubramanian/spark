@@ -20,7 +20,8 @@ package org.apache.spark.sql.json
 import java.io.IOException
 
 import org.apache.hadoop.fs.Path
-import org.apache.spark.sql.{DataFrame, SQLContext}
+
+import org.apache.spark.sql.{SaveMode, DataFrame, SQLContext}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types.StructType
 
@@ -36,7 +37,7 @@ private[sql] class DefaultSource
   override def createRelation(
       sqlContext: SQLContext,
       parameters: Map[String, String]): BaseRelation = {
-    val path = parameters.getOrElse("path", sys.error("Option 'path' not specified"))
+    val path = checkPath(parameters)
     val samplingRatio = parameters.get("samplingRatio").map(_.toDouble).getOrElse(1.0)
 
     JSONRelation(path, samplingRatio, None)(sqlContext)
@@ -47,7 +48,7 @@ private[sql] class DefaultSource
       sqlContext: SQLContext,
       parameters: Map[String, String],
       schema: StructType): BaseRelation = {
-    val path = parameters.getOrElse("path", sys.error("Option 'path' not specified"))
+    val path = checkPath(parameters)
     val samplingRatio = parameters.get("samplingRatio").map(_.toDouble).getOrElse(1.0)
 
     JSONRelation(path, samplingRatio, Some(schema))(sqlContext)
