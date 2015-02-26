@@ -28,7 +28,7 @@ from operator import itemgetter
 __all__ = [
     "DataType", "NullType", "StringType", "BinaryType", "BooleanType", "DateType",
     "TimestampType", "DecimalType", "DoubleType", "FloatType", "ByteType", "IntegerType",
-    "LongType", "ShortType", "ArrayType", "MapType", "StructField", "StructType", ]
+    "LongType", "ShortType", "ArrayType", "MapType", "StructField", "StructType"]
 
 
 class DataType(object):
@@ -51,6 +51,9 @@ class DataType(object):
     @classmethod
     def typeName(cls):
         return cls.__name__[:-4].lower()
+
+    def simpleString(self):
+        return self.typeName()
 
     def jsonValue(self):
         return self.typeName()
@@ -145,6 +148,12 @@ class DecimalType(DataType):
         self.scale = scale
         self.hasPrecisionInfo = precision is not None
 
+    def simpleString(self):
+        if self.hasPrecisionInfo:
+            return "decimal(%d,%d)" % (self.precision, self.scale)
+        else:
+            return "decimal(10,0)"
+
     def jsonValue(self):
         if self.hasPrecisionInfo:
             return "decimal(%d,%d)" % (self.precision, self.scale)
@@ -180,6 +189,8 @@ class ByteType(PrimitiveType):
 
     The data type representing int values with 1 singed byte.
     """
+    def simpleString(self):
+        return 'tinyint'
 
 
 class IntegerType(PrimitiveType):
@@ -188,6 +199,8 @@ class IntegerType(PrimitiveType):
 
     The data type representing int values.
     """
+    def simpleString(self):
+        return 'int'
 
 
 class LongType(PrimitiveType):
@@ -198,6 +211,8 @@ class LongType(PrimitiveType):
     beyond the range of [-9223372036854775808, 9223372036854775807],
     please use DecimalType.
     """
+    def simpleString(self):
+        return 'bigint'
 
 
 class ShortType(PrimitiveType):
@@ -206,6 +221,8 @@ class ShortType(PrimitiveType):
 
     The data type representing int values with 2 signed bytes.
     """
+    def simpleString(self):
+        return 'smallint'
 
 
 class ArrayType(DataType):
@@ -232,6 +249,9 @@ class ArrayType(DataType):
         """
         self.elementType = elementType
         self.containsNull = containsNull
+
+    def simpleString(self):
+        return 'array<%s>' % self.elementType.simpleString()
 
     def __repr__(self):
         return "ArrayType(%s,%s)" % (self.elementType,
@@ -282,6 +302,9 @@ class MapType(DataType):
         self.keyType = keyType
         self.valueType = valueType
         self.valueContainsNull = valueContainsNull
+
+    def simpleString(self):
+        return 'map<%s,%s>' % (self.keyType.simpleString(), self.valueType.simpleString())
 
     def __repr__(self):
         return "MapType(%s,%s,%s)" % (self.keyType, self.valueType,
@@ -337,6 +360,9 @@ class StructField(DataType):
         self.nullable = nullable
         self.metadata = metadata or {}
 
+    def simpleString(self):
+        return '%s:%s' % (self.name, self.dataType.simpleString())
+
     def __repr__(self):
         return "StructField(%s,%s,%s)" % (self.name, self.dataType,
                                           str(self.nullable).lower())
@@ -378,6 +404,9 @@ class StructType(DataType):
         False
         """
         self.fields = fields
+
+    def simpleString(self):
+        return 'struct<%s>' % (','.join(f.simpleString() for f in self.fields))
 
     def __repr__(self):
         return ("StructType(List(%s))" %
@@ -434,6 +463,9 @@ class UserDefinedType(DataType):
         Converts a SQL datum into a user-type object.
         """
         raise NotImplementedError("UDT must implement deserialize().")
+
+    def simpleString(self):
+        return 'null'
 
     def json(self):
         return json.dumps(self.jsonValue(), separators=(',', ':'), sort_keys=True)
@@ -551,7 +583,7 @@ def _parse_datatype_json_value(json_value):
 _type_mappings = {
     type(None): NullType,
     bool: BooleanType,
-    int: IntegerType,
+    int: LongType,
     long: LongType,
     float: DoubleType,
     str: StringType,
@@ -572,7 +604,7 @@ def _infer_type(obj):
     ExamplePointUDT
     """
     if obj is None:
-        raise ValueError("Can not infer type for None")
+        return NullType()
 
     if hasattr(obj, '__UDT__'):
         return obj.__UDT__
@@ -605,15 +637,14 @@ def _infer_schema(row):
     if isinstance(row, dict):
         items = sorted(row.items())
 
-    elif isinstance(row, tuple):
+    elif isinstance(row, (tuple, list)):
         if hasattr(row, "_fields"):  # namedtuple
             items = zip(row._fields, tuple(row))
         elif hasattr(row, "__FIELDS__"):  # Row
             items = zip(row.__FIELDS__, tuple(row))
-        elif all(isinstance(x, tuple) and len(x) == 2 for x in row):
-            items = row
         else:
-            raise ValueError("Can't infer schema from tuple")
+            names = ['_%d' % i for i in range(1, len(row) + 1)]
+            items = zip(names, row)
 
     elif hasattr(row, "__dict__"):  # object
         items = sorted(row.__dict__.items())
@@ -780,17 +811,10 @@ def _create_converter(dataType):
         if obj is None:
             return
 
-        if isinstance(obj, tuple):
-            if hasattr(obj, "_fields"):
-                d = dict(zip(obj._fields, obj))
-            elif hasattr(obj, "__FIELDS__"):
-                d = dict(zip(obj.__FIELDS__, obj))
-            elif all(isinstance(x, tuple) and len(x) == 2 for x in obj):
-                d = dict(obj)
-            else:
-                raise ValueError("unexpected tuple: %s" % str(obj))
+        if isinstance(obj, (tuple, list)):
+            return tuple(conv(v) for v, conv in zip(obj, converters))
 
-        elif isinstance(obj, dict):
+        if isinstance(obj, dict):
             d = obj
         elif hasattr(obj, "__dict__"):  # object
             d = obj.__dict__
@@ -901,11 +925,11 @@ def _infer_schema_type(obj, dataType):
     >>> schema = _parse_schema_abstract("a b c d")
     >>> row = (1, 1.0, "str", datetime.date(2014, 10, 10))
     >>> _infer_schema_type(row, schema)
-    StructType...IntegerType...DoubleType...StringType...DateType...
+    StructType...LongType...DoubleType...StringType...DateType...
     >>> row = [[1], {"key": (1, 2.0)}]
     >>> schema = _parse_schema_abstract("a[] b{c d}")
     >>> _infer_schema_type(row, schema)
-    StructType...a,ArrayType...b,MapType(StringType,...c,IntegerType...
+    StructType...a,ArrayType...b,MapType(StringType,...c,LongType...
     """
     if dataType is None:
         return _infer_type(obj)
@@ -960,7 +984,7 @@ def _verify_type(obj, dataType):
 
     >>> _verify_type(None, StructType([]))
     >>> _verify_type("", StringType())
-    >>> _verify_type(0, IntegerType())
+    >>> _verify_type(0, LongType())
     >>> _verify_type(range(3), ArrayType(ShortType()))
     >>> _verify_type(set(), ArrayType(StringType())) # doctest: +IGNORE_EXCEPTION_DETAIL
     Traceback (most recent call last):
@@ -990,7 +1014,7 @@ def _verify_type(obj, dataType):
         return
 
     _type = type(dataType)
-    assert _type in _acceptable_types, "unkown datatype: %s" % dataType
+    assert _type in _acceptable_types, "unknown datatype: %s" % dataType
 
     # subclass of them can not be deserialized in JVM
     if type(obj) not in _acceptable_types[_type]:
@@ -1008,7 +1032,7 @@ def _verify_type(obj, dataType):
 
     elif isinstance(dataType, StructType):
         if len(obj) != len(dataType.fields):
-            raise ValueError("Length of object (%d) does not match with"
+            raise ValueError("Length of object (%d) does not match with "
                              "length of fields (%d)" % (len(obj), len(dataType.fields)))
         for v, f in zip(obj, dataType.fields):
             _verify_type(v, f.dataType)
