@@ -888,9 +888,9 @@ object ALS extends Logging {
 
     val userIdAndFactors = userInBlocks
       .mapValues(_.srcIds)
-      .join(userFactors)
-      .mapPartitions({ items =>
-        items.flatMap { case (_, (ids, factors)) =>
+      .join(users)
+      .mapPartitions({ p =>
+        p.flatMap { case (_, (ids, factors)) =>
           ids.view.zip(factors)
         }
       // Preserve the partitioning because IDs are consistent with the partitioners in userInBlocks
@@ -900,9 +900,9 @@ object ALS extends Logging {
       .persist(finalRDDStorageLevel)
     val itemIdAndFactors = itemInBlocks
       .mapValues(_.srcIds)
-      .join(itemFactors)
-      .mapPartitions({ items =>
-        items.flatMap { case (_, (ids, factors)) =>
+      .join(items)
+      .mapPartitions({ p =>
+        p.flatMap { case (_, (ids, factors)) =>
           ids.view.zip(factors)
         }
       }, preservesPartitioning = true)
@@ -910,7 +910,7 @@ object ALS extends Logging {
       .persist(finalRDDStorageLevel)
     if (finalRDDStorageLevel != StorageLevel.NONE) {
       userIdAndFactors.count()
-      itemFactors.unpersist()
+      items.unpersist()
       itemIdAndFactors.count()
       userInBlocks.unpersist()
       userOutBlocks.unpersist()
@@ -919,6 +919,8 @@ object ALS extends Logging {
       blockRatings.unpersist()
     }
     (userIdAndFactors, itemIdAndFactors)
+  }
+
   /**
    * Implementation of the ALS algorithm.
    */
@@ -1504,7 +1506,7 @@ object ALS extends Logging {
   }
 
   /**
-   * Evaluate the cost function f(), as in \cite{Zhou2008Largescale}
+   * Evaluate the cost function f(U,M), as in \cite{zhou2008largescale}
    *
    * @param srcFactorBlocks src factors
    * @param srcOutBlocks src out-blocks
@@ -1626,7 +1628,8 @@ object ALS extends Logging {
       srcEncoder: LocalIndexEncoder,
       implicitPrefs: Boolean = false,
       alpha: Double = 1.0,
-      solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = {
+      solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = 
+    {
 
     val numSrcBlocks = srcFactorBlocks.partitions.length
     val YtY = 
@@ -1662,7 +1665,7 @@ object ALS extends Logging {
       val dstFactors = new Array[Array[Float]](len)
       var j = 0
       val normEqn = new NormalEquation(rank)
-      while (j < len) {
+     while (j < len) {
         normEqn.reset()
         if (implicitPrefs) {
           normEqn.merge(YtY.get)
