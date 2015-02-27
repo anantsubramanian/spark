@@ -542,7 +542,7 @@ object ALS extends Logging {
         new CholeskySolver
     }
 
-    val blockRatings = 
+    val blockRatings: RDD[((Int, Int), RatingBlock[ID])] = 
       partitionRatings(ratings, userPart, itemPart)
       .persist(intermediateRDDStorageLevel)
 
@@ -1158,7 +1158,7 @@ object ALS extends Logging {
       srcPart: Partitioner,
       dstPart: Partitioner): RDD[((Int, Int), RatingBlock[ID])] = {
 
-     /* The implementation produces the same result as the following but generates less objects.
+     /* The implementation produces the same result as the following but generates fewer objects.
 
      ratings.map { r =>
        ((srcPart.getPartition(r.user), dstPart.getPartition(r.item)), r)
@@ -1452,9 +1452,7 @@ object ALS extends Logging {
 
     type UncompressedCols = (Int, Array[ID], Array[Int], Array[Float])
 
-    def toUncompressedCols(tup: ((Int,Int), RatingBlock[ID])): (Int, UncompressedCols) = {
-      val key: (Int,Int) = tup._1
-      val block: RatingBlock[ID] = tup._2
+    def toUncompressedCols(key: (Int,Int), block: RatingBlock[ID]): (Int, UncompressedCols) = {
       val localBlockInds: Array[Int] = computeLocalIndices(block.dstIds)
       (key._1, (key._2, block.srcIds, localBlockInds, block.ratings) ) 
     }
@@ -1491,7 +1489,7 @@ object ALS extends Logging {
       }
     }
     val inBlocks = ratingBlocks
-      .map(toUncompressedCols)
+      .map{ case(key,block) => toUncompressedCols(key,block) } //(BlockId, (Int, Array[ID], Array[Int], Array[Float]) )
       .groupByKey(new ALSPartitioner(srcPart.numPartitions))
       .mapValues(toCompressedSparseCols)
       .setName(prefix + "InBlocks")
@@ -1506,9 +1504,14 @@ object ALS extends Logging {
   }
 
   /**
-   * Evaluate the cost function f(U,M), as in \cite{zhou2008largescale}
+   * Evaluate the gradient function f(U,M), as in \cite{zhou2008largescale}
    *
-   * @param srcFactorBlocks src factors
+   * Comments are written assuming the gradient WRT users is being calculated.
+   * For, e.g. the ith user u_i:
+   *  1/2 * df(u_i)/du_i = (M_i * M^T_i + \lambda * n_{u_i} )*u_i - M_{u_i}*R^T_{u_i}
+   *
+   * @param srcFactorBlocks src factors; the item factors, m_i
+   * @param currentFactorBlocks current user factors, u_i
    * @param srcOutBlocks src out-blocks
    * @param dstInBlocks dst in-blocks
    * @param rank rank
@@ -1518,10 +1521,11 @@ object ALS extends Logging {
    * @param alpha the alpha constant in the implicit preference formulation
    * @param solver solver for least squares problems
    *
-   * @return dst factors
+   * @return grad gradient vector 
    */
-  private def evalCostFunction[ID](
+  private def evalGradient[ID](
       srcFactorBlocks: RDD[(Int, FactorBlock)],
+      currentFactorBlocks: RDD[(Int, FactorBlock)],
       srcOutBlocks: RDD[(Int, OutBlock)],
       dstInBlocks: RDD[(Int, InBlock[ID])],
       rank: Int,
@@ -1529,19 +1533,14 @@ object ALS extends Logging {
       srcEncoder: LocalIndexEncoder,
       implicitPrefs: Boolean = false,
       alpha: Double = 1.0,
-      solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = {
-
+      solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = 
+  {
     val numSrcBlocks = srcFactorBlocks.partitions.length
-    val YtY = 
-      if (implicitPrefs) 
-        Some(computeYtY(srcFactorBlocks, rank)) 
-      else 
-        None
 
-    /*type BlockFacTuple = (OutBlock,FactorBlock)*/
     def filterFactorsToSend(
         srcBlockId: Int, 
-        tup: (OutBlock, FactorBlock)) = {
+        tup: (OutBlock, FactorBlock)) = 
+    {
 
       val block = tup._1
       val factors = tup._2
@@ -1553,41 +1552,52 @@ object ALS extends Logging {
         }
     }
 
-    def solveNormalEqn(
-        block: InBlock[ID], 
-        factorList: Iterable[(Int,FactorBlock)] ): FactorBlock = {
-
+    def computeGradientBlock(
+        block: InBlock[ID],  //{m_j}
+        factorList: Iterable[(Int,FactorBlock)],
+        current: FactorBlock 
+        ): FactorBlock = 
+    {
       val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
       factorList.foreach { case (srcBlockId, vec) =>
         sortedSrcFactors(srcBlockId) = vec
       }
       val len = block.srcIds.length
-      val dstFactors = new Array[Array[Float]](len)
-      var j = 0
-      val normEqn = new NormalEquation(rank)
-      while (j < len) {
-        normEqn.reset()
-        if (implicitPrefs) {
-          normEqn.merge(YtY.get)
-        }
-        var i = block.dstPtrs(j)
-        while (i < block.dstPtrs(j + 1)) {
-          val encoded = block.dstEncodedIndices(i)
+
+      // initialize array of gradient vectors
+      val grad = new Array[Array[Float]](len)
+
+      var i = 0
+
+      // loop over all users {u_i}
+      while (i < len) 
+      {
+        // inialize grad(i) to zero
+        ju.Arrays.fill(grad(i), 0.0f)
+
+        // loop over all input {m_j} in block
+        var j = block.dstPtrs(i)
+        var num_factors = 0
+        while (j < block.dstPtrs(i + 1)) 
+        {
+          val encoded = block.dstEncodedIndices(j)
           val blockId = srcEncoder.blockId(encoded)
           val localIndex = srcEncoder.localIndex(encoded)
-          val srcFactor = sortedSrcFactors(blockId)(localIndex)
-          val rating = block.ratings(i)
-          if (implicitPrefs) {
-            normEqn.addImplicit(srcFactor, rating, alpha)
-          } else {
-            normEqn.add(srcFactor, rating)
-          }
-          i += 1
+          val srcFactor = sortedSrcFactors(blockId)(localIndex) //m_
+          val rating = block.ratings(j)
+          val a = blas.sdot(rank,current(i),1,srcFactor,1) - rating
+
+          // y := a*x + y 
+          blas.saxpy(rank,a,srcFactor ,1,grad(i),1)
+          j += 1
+          num_factors += 1
         }
-        dstFactors(j) = solver.solve(normEqn, regParam)
-        j += 1
+        // add \lambda * n * u_i
+        blas.saxpy(rank,regParam.toFloat*num_factors,current(i),1,grad(i),1)
+        blas.sscal(rank,2.0f,grad(i),1)
+        i += 1
       }
-      dstFactors
+      grad
     }
 
     val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = 
@@ -1596,12 +1606,14 @@ object ALS extends Logging {
       .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
       .groupByKey(new ALSPartitioner(dstInBlocks.partitions.length))
 
-    val newFactors: RDD[(Int, FactorBlock)] = 
+    val gradient: RDD[(Int, FactorBlock)] = 
       dstInBlocks
-      .join(srcOut)
-      .mapValues{case (block, factorTuple) => solveNormalEqn(block,factorTuple)}
-
-    newFactors
+      .cogroup(srcOut,currentFactorBlocks)
+      //use .head since cogroup has produced Iterables
+      .mapValues{case (block,factorTuple,fac) => 
+        computeGradientBlock(block.head,factorTuple.head,fac.head)
+      }
+    gradient
   }
 
   /**
