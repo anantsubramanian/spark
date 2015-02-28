@@ -1253,6 +1253,33 @@ object ALS extends Logging {
     /** Size the of block. */
     def length: Int = srcIds.length
 
+
+    /** Count the number of ratings per user/item 
+     */
+    def countRatings(): Array[Int] = {
+      val len = length
+      assert(len > 0, "Empty in-link block should not exist.")
+      sort()
+      val dstCountsBuilder = mutable.ArrayBuilder.make[Int]
+      var preSrcId = srcIds(0)
+      var curCount = 1
+      var i = 1
+      var j = 0
+      while (i < len) {
+        val srcId = srcIds(i)
+        if (srcId != preSrcId) {
+          dstCountsBuilder += curCount
+          preSrcId = srcId
+          j += 1
+          curCount = 0
+        }
+        curCount += 1
+        i += 1
+      }
+      dstCountsBuilder += curCount
+
+      dstCountsBuilder.result()
+    }
     /**
      * Compresses the block into an [[InBlock]]. The algorithm is the same as converting a
      * sparse matrix from coordinate list (COO) format into compressed sparse column (CSC) format.
