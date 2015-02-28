@@ -546,7 +546,7 @@ object ALS extends Logging {
       partitionRatings(ratings, userPart, itemPart)
       .persist(intermediateRDDStorageLevel)
 
-    val (userInBlocks, userOutBlocks) = makeBlocks("user", 
+    val (userInBlocks, userOutBlocks, userCounts) = makeBlocks("user", 
       blockRatings, 
       userPart, 
       itemPart, 
@@ -559,7 +559,7 @@ object ALS extends Logging {
       case ((userBlockId, itemBlockId), RatingBlock(userIds, itemIds, localRatings)) =>
         ((itemBlockId, userBlockId), RatingBlock(itemIds, userIds, localRatings))
     }
-    val (itemInBlocks, itemOutBlocks) = makeBlocks("item", 
+    val (itemInBlocks, itemOutBlocks, itemCounts) = makeBlocks("item", 
       swappedBlockRatings, 
       itemPart, 
       userPart, 
@@ -948,7 +948,7 @@ object ALS extends Logging {
     val solver = if (nonnegative) new NNLSSolver else new CholeskySolver
     val blockRatings = partitionRatings(ratings, userPart, itemPart)
       .persist(intermediateRDDStorageLevel)
-    val (userInBlocks, userOutBlocks) =
+    val (userInBlocks, userOutBlocks, userCounts) =
       makeBlocks("user", blockRatings, userPart, itemPart, intermediateRDDStorageLevel)
     // materialize blockRatings and user blocks
     userOutBlocks.count()
@@ -956,7 +956,7 @@ object ALS extends Logging {
       case ((userBlockId, itemBlockId), RatingBlock(userIds, itemIds, localRatings)) =>
         ((itemBlockId, userBlockId), RatingBlock(itemIds, userIds, localRatings))
     }
-    val (itemInBlocks, itemOutBlocks) =
+    val (itemInBlocks, itemOutBlocks, itemCounts) =
       makeBlocks("item", swappedBlockRatings, itemPart, userPart, intermediateRDDStorageLevel)
     // materialize item blocks
     itemOutBlocks.count()
@@ -1438,7 +1438,7 @@ object ALS extends Logging {
       srcPart: Partitioner,
       dstPart: Partitioner,
       storageLevel: StorageLevel)(
-      implicit srcOrd: Ordering[ID]): (RDD[(Int, InBlock[ID])], RDD[(Int, OutBlock)]) = {
+      implicit srcOrd: Ordering[ID]): (RDD[(Int, InBlock[ID])], RDD[(Int, OutBlock)], RDD[(Int, Array[Int])]) = {
 
     /**
      * compute the local destination indices for each index i as
@@ -1484,6 +1484,24 @@ object ALS extends Logging {
       (key._1, (key._2, block.srcIds, localBlockInds, block.ratings) ) 
     }
 
+    def toUncompressedSparseCols(iter: Iterable[UncompressedCols]): UncompressedInBlock[ID] = {
+      val encoder = new LocalIndexEncoder(dstPart.numPartitions)
+      val builder = new UncompressedInBlockBuilder[ID](encoder)
+      iter.foreach { case (dstBlockId, srcIds, dstLocalIndices, ratings) =>
+        builder.add(dstBlockId, srcIds, dstLocalIndices, ratings)
+      }
+      builder.build()
+    }
+
+    def toCounts(iter: Iterable[UncompressedCols]): Array[Int] = {
+      val encoder = new LocalIndexEncoder(dstPart.numPartitions)
+      val builder = new UncompressedInBlockBuilder[ID](encoder)
+      iter.foreach { case (dstBlockId, srcIds, dstLocalIndices, ratings) =>
+        builder.add(dstBlockId, srcIds, dstLocalIndices, ratings)
+      }
+      builder.build().countRatings()
+    }
+
     def toCompressedSparseCols(iter: Iterable[UncompressedCols]): InBlock[ID] = {
       val encoder = new LocalIndexEncoder(dstPart.numPartitions)
       val builder = new UncompressedInBlockBuilder[ID](encoder)
@@ -1515,6 +1533,14 @@ object ALS extends Logging {
         x.result()
       }
     }
+
+    val counts = ratingBlocks
+      .map{ case(key,block) => toUncompressedCols(key,block) } //(BlockId, (Int, Array[ID], Array[Int], Array[Float]) )
+      .groupByKey(new ALSPartitioner(srcPart.numPartitions))
+      .mapValues(toCounts)
+      .setName(prefix + "RatingsCounts")
+      .persist(storageLevel)
+
     val inBlocks = ratingBlocks
       .map{ case(key,block) => toUncompressedCols(key,block) } //(BlockId, (Int, Array[ID], Array[Int], Array[Float]) )
       .groupByKey(new ALSPartitioner(srcPart.numPartitions))
@@ -1527,7 +1553,7 @@ object ALS extends Logging {
       .setName(prefix + "OutBlocks")
       .persist(storageLevel)
 
-    (inBlocks, outBlocks)
+    (inBlocks, outBlocks, counts)
   }
 
   /**
