@@ -505,6 +505,37 @@ object ALS extends Logging {
   }
 
   /**
+   * Backtracking linesearch for type [X] and f(X) = Double
+   *
+   */
+  def linesearch[X](
+      func: (X) => Double, 
+      axpy: (X,X,Double) => X,
+      x0: X, 
+      direc: X,
+      reduceFrac: Double,
+      initStep: Double,
+      dirProdGrad: Double
+      ): Double = 
+  {
+    val f0: Double = func(x0)
+
+    var step: Double = initStep
+    var x: X = axpy(x0,direc,step)
+    var f: Double = func(x)
+    var k: Int = 1;
+    while (f0 - f >= step*dirProdGrad) 
+    {
+      x = axpy(x0,direc,step)
+      f = func(x)
+      step = reduceFrac * step
+      logStdout("linesearch: " + k + ": alpha: " + step + ": f(x): " + f)
+    }
+    step
+  }
+    
+
+  /**
    * Implementation of the Nonlinear Preconditioned Conjugate Gradient (PNCG) 
    * ALS is used as a preconditioner to the standard nonlinear CG.
    *
@@ -1668,6 +1699,108 @@ object ALS extends Logging {
       }
     gradient
   }
+
+  /**
+   * Compute the Frobenius norm part of the cost function for the current set of factors 
+   *
+   * @param srcFactorBlocks src factors
+   * @param currentFactorBlocks current user factors, u_i
+   * @param srcOutBlocks src out-blocks
+   * @param dstInBlocks dst in-blocks
+   * @param rank rank
+   * @param regParam regularization constant
+   * @param srcEncoder encoder for src local indices
+   * @param implicitPrefs whether to use implicit preference
+   * @param alpha the alpha constant in the implicit preference formulation
+   * @param solver solver for least squares problems
+   *
+   * @return dst factors
+   */
+  private def evalCostFunction[ID](
+      srcFactorBlocks: RDD[(Int, FactorBlock)],
+      currentFactorBlocks: RDD[(Int, FactorBlock)],
+      srcOutBlocks: RDD[(Int, OutBlock)],
+      dstInBlocks: RDD[(Int, InBlock[ID])],
+      rank: Int,
+      regParam: Double,
+      srcEncoder: LocalIndexEncoder,
+      implicitPrefs: Boolean = false,
+      alpha: Double = 1.0
+      ): Double = 
+    {
+
+    val numSrcBlocks = srcFactorBlocks.partitions.length
+    val YtY = 
+      if (implicitPrefs) 
+        Some(computeYtY(srcFactorBlocks, rank)) 
+      else 
+        None
+
+    /*type BlockFacTuple = (OutBlock,FactorBlock)*/
+    def filterFactorsToSend(
+        srcBlockId: Int, 
+        tup: (OutBlock, FactorBlock)) = {
+
+      val block = tup._1
+      val factors = tup._2
+      block
+        .view
+        .zipWithIndex
+        .map{ case (activeIndices, dstBlockId) =>
+          (dstBlockId, (srcBlockId, activeIndices.map(factors(_))))
+        }
+    }
+
+    def computeSquaredError(
+        block: InBlock[ID], 
+        factorList: Iterable[(Int,FactorBlock)],
+        current: FactorBlock 
+        ): Double = 
+    {
+
+      val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
+      factorList.foreach { case (srcBlockId, vec) =>
+        sortedSrcFactors(srcBlockId) = vec
+      }
+      val len = block.srcIds.length
+      var j = 0
+      var sumErrs: Double = 0
+      while (j < len) 
+      {
+        var i = block.dstPtrs(j)
+        while (i < block.dstPtrs(j + 1)) {
+          val encoded = block.dstEncodedIndices(i)
+          val blockId = srcEncoder.blockId(encoded)
+          val localIndex = srcEncoder.localIndex(encoded)
+          val srcFactor = sortedSrcFactors(blockId)(localIndex)
+          val rating = block.ratings(i)
+          val diff = blas.sdot(rank,current(i),1,srcFactor,1) - rating
+          sumErrs += math.pow(diff.toDouble, 2)
+          i += 1
+        }
+        j += 1
+      }
+      sumErrs
+    }
+
+    val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = 
+      srcOutBlocks
+      .join(srcFactorBlocks)
+      .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
+      .groupByKey(new ALSPartitioner(dstInBlocks.partitions.length))
+
+    val result: Double = 
+      dstInBlocks
+      .cogroup(srcOut,currentFactorBlocks)
+      .mapValues{case (block,factorTuple,fac) => 
+        computeSquaredError(block.head,factorTuple.head,fac.head)
+      }
+      .values
+      .reduce(_+_)
+
+    result
+  }
+
 
   /**
    * Compute dst factors by constructing and solving least square problems.
