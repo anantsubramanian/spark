@@ -524,9 +524,10 @@ object ALS extends Logging {
     var x: X = axpy(x0,direc,step)
     var f: Double = func(x)
     var k: Int = 1;
-    while (f - f0 <= step*dirProdGrad) 
+    while (f - f0 > step*dirProdGrad) 
     {
-      x = axpy(x0,direc,step)
+      // x = a*direc + x0
+      x = axpy(direc,x0,step)
       f = func(x)
       step = reduceFrac * step
       logStdout("linesearch: " + k + ": alpha: " + step + ": f(x): " + f)
@@ -982,6 +983,7 @@ object ALS extends Logging {
     val (userInBlocks, userOutBlocks, userCounts) =
       makeBlocks("user", blockRatings, userPart, itemPart, intermediateRDDStorageLevel)
     // materialize blockRatings and user blocks
+    userCounts.count()
     userOutBlocks.count()
     val swappedBlockRatings = blockRatings.map {
       case ((userBlockId, itemBlockId), RatingBlock(userIds, itemIds, localRatings)) =>
@@ -990,10 +992,82 @@ object ALS extends Logging {
     val (itemInBlocks, itemOutBlocks, itemCounts) =
       makeBlocks("item", swappedBlockRatings, itemPart, userPart, intermediateRDDStorageLevel)
     // materialize item blocks
+    itemCounts.count()
     itemOutBlocks.count()
     val seedGen = new XORShiftRandom(seed)
     var userFactors = initialize(userInBlocks, rank, seedGen.nextLong())
     var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong())
+
+    //* can delete between here and loop
+    type FactorRDD = RDD[(Int,FactorBlock)]
+
+    /** 
+     * compute x dot y, and return a scalar
+     * @param x a vector represented as a FactorBlock
+     * @param y a vector represented as a FactorBlock
+     */
+    def blockDOT(x: FactorBlock, y: FactorBlock): Float = 
+    {
+      val numVectors = x.length
+      var result: Float = 0.0f
+      var k = 0
+      while (k < numVectors)
+      {
+        result += blas.sdot(rank,x(k),1,y(k),1)
+        k += 1
+      }
+      result
+    }
+    /** 
+     * compute x dot x, and return a scalar
+     * @param x a vector represented as a FactorBlock
+     */
+    def blockNRMSQR(x: FactorBlock): Float = 
+    {
+      val numVectors = x.length
+      var result: Float = 0.0f
+      var norm: Float = 0.0f
+      var k = 0
+      while (k < numVectors)
+      {
+        norm = blas.snrm2(rank,x(k),1)
+        result += norm * norm
+        k += 1
+      }
+      result
+    }
+
+    /** 
+     * compute dot product, and return a scalar
+     * @param xs RDD of FactorBlocks
+     * @param ys RDD of FactorBlocks
+     */
+    def rddDOT(xs: FactorRDD, ys: FactorRDD): Float = {
+      xs.join(ys)
+        .map{case (_,(x,y)) => blockDOT(x,y)}
+        .reduce{_+_}
+    }
+
+
+    /** 
+     * compute x dot x, and return a scalar
+     * @param xs RDD of FactorBlocks
+     */
+    def rddNORMSQR(xs: FactorRDD): Float = {
+      xs.map{case (_,x) => blockNRMSQR(x)}
+        .reduce(_+_)
+    }
+
+    /** 
+     * compute 2-norm of an RDD of FactorBlocks
+     * @param xs RDD of FactorBlocks
+     */
+    def rddNORM2(xs: FactorRDD): Float = {
+      math.sqrt(rddNORMSQR(xs).toDouble).toFloat
+    }
+
+
+    logStdout("f(u,m): ||g_u||^2: ||g_m||^2 ")
     if (implicitPrefs) {
       for (iter <- 1 to maxIter) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1014,8 +1088,44 @@ object ALS extends Logging {
       for (iter <- 0 until maxIter) {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
           userLocalIndexEncoder, solver = solver)
+        /*var f = evalFrobeniusCost(userFactors, itemFactors, userOutBlocks, itemInBlocks, rank, regParam,*/
+        /*  userLocalIndexEncoder)*/
+        /*logStdout("f(u,m) = " + f + " (pt 1)")*/
+        var n = evalTikhonovNorm(itemFactors, itemCounts, rank, regParam)
+        /*logStdout("lambda * sum ||m_i||^2 = " + n )*/
+
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
           itemLocalIndexEncoder, solver = solver)
+
+        var f = evalFrobeniusCost(itemFactors, userFactors, itemOutBlocks, userInBlocks, rank, regParam,
+          itemLocalIndexEncoder)
+        /*logStdout("f(u,m) = " + f + " (pt 2)")*/
+
+        n += evalTikhonovNorm(userFactors, userCounts, rank, regParam)
+        /*logStdout("lambda * sum ||u_i||^2 = " + n )*/
+        /*logStdout("f(u,m) = " + (f + n))*/
+        val gu = evalGradient(
+          itemFactors, 
+          userFactors,
+          itemOutBlocks, 
+          userInBlocks, 
+          rank, 
+          regParam,
+          itemLocalIndexEncoder
+        )
+        /*logStdout("||g_u|| = " + rddNORMSQR(gu))*/
+        /*logStdout("||g_m|| = " + rddNORMSQR(gm))*/
+        val gm = evalGradient(
+          userFactors,
+          itemFactors, 
+          userOutBlocks, 
+          itemInBlocks, 
+          rank, 
+          regParam,
+          userLocalIndexEncoder
+        )
+        /*logStdout("||g_m|| = " + rddNORMSQR(gm))*/
+        logStdout(iter +": "+ (f + n) +": "+ rddNORMSQR(gu) +": "+ rddNORMSQR(gm))
       }
     }
     val userIdAndFactors = userInBlocks
@@ -1616,8 +1726,8 @@ object ALS extends Logging {
       regParam: Double,
       srcEncoder: LocalIndexEncoder,
       implicitPrefs: Boolean = false,
-      alpha: Double = 1.0,
-      solver: LeastSquaresNESolver): RDD[(Int, FactorBlock)] = 
+      alpha: Double = 1.0
+      ): RDD[(Int, FactorBlock)] = 
   {
     val numSrcBlocks = srcFactorBlocks.partitions.length
 
@@ -1649,7 +1759,7 @@ object ALS extends Logging {
       val len = block.srcIds.length
 
       // initialize array of gradient vectors
-      val grad = new Array[Array[Float]](len)
+      val grad: Array[Array[Float]] = Array.fill(len)(Array.fill[Float](rank)(0f))
 
       var i = 0
 
@@ -1657,7 +1767,7 @@ object ALS extends Logging {
       while (i < len) 
       {
         // inialize grad(i) to zero
-        ju.Arrays.fill(grad(i), 0.0f)
+        /*ju.Arrays.fill(grad(i), 0.0f)*/
 
         // loop over all input {m_j} in block
         var j = block.dstPtrs(i)
@@ -1690,13 +1800,16 @@ object ALS extends Logging {
       .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
       .groupByKey(new ALSPartitioner(dstInBlocks.partitions.length))
 
-    val gradient: RDD[(Int, FactorBlock)] = 
-      dstInBlocks
-      .cogroup(srcOut,currentFactorBlocks)
+    val gradient: RDD[(Int, FactorBlock)] = dstInBlocks
+      .join(srcOut)
+      .join(currentFactorBlocks)
+      .mapValues{case ((block,factorTuple),fac) => computeGradientBlock(block,factorTuple,fac)}
+      
+      /*.cogroup(srcOut,currentFactorBlocks)*/
       //use .head since cogroup has produced Iterables
-      .mapValues{case (block,factorTuple,fac) => 
-        computeGradientBlock(block.head,factorTuple.head,fac.head)
-      }
+      /*.mapValues{case (block,factorTuple,fac) => */
+      /*  computeGradientBlock(block.head,factorTuple.head,fac.head)*/
+      /*}*/
     gradient
   }
 
@@ -1722,6 +1835,8 @@ object ALS extends Logging {
       var j: Int = 0
       while (j < numFactors) {
         result(j)= blas.sdot(rank,block(j),1,block(j),1)
+        /*logStdout("dot" + j + " = " + result(j))*/
+        j += 1
       }
       result
     }
@@ -1732,6 +1847,8 @@ object ALS extends Logging {
       var j: Int = 0
       while (j < numFactors) {
         result += factorNorms(j) * numRatings(j)
+        /*logStdout("scale" + j + " : " + result)*/
+        j += 1
       }
       result
     }
@@ -1798,9 +1915,10 @@ object ALS extends Logging {
 
     def computeSquaredError(
         block: InBlock[ID], 
+        /*factorList: Iterable[(Int,FactorBlock)],*/
         factorList: Iterable[(Int,FactorBlock)],
         current: FactorBlock 
-        ): Double = 
+        ): Float = 
     {
 
       val sortedSrcFactors = new Array[FactorBlock](numSrcBlocks)
@@ -1808,6 +1926,8 @@ object ALS extends Logging {
         sortedSrcFactors(srcBlockId) = vec
       }
       val len = block.srcIds.length
+      /*logStdout("block.srcIds.length = " + len)*/
+      /*logStdout("current.length = " + current.length)*/
       var j = 0
       var sumErrs: Double = 0
       while (j < len) 
@@ -1819,26 +1939,27 @@ object ALS extends Logging {
           val localIndex = srcEncoder.localIndex(encoded)
           val srcFactor = sortedSrcFactors(blockId)(localIndex)
           val rating = block.ratings(i)
-          val diff = blas.sdot(rank,current(i),1,srcFactor,1) - rating
+          val diff = blas.sdot(rank,current(j),1,srcFactor,1) - rating
           sumErrs += math.pow(diff.toDouble, 2)
           i += 1
         }
         j += 1
       }
-      sumErrs
+      sumErrs.toFloat
     }
 
-    val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = 
-      srcOutBlocks
+    val srcOut: RDD[(Int, Iterable[(Int,FactorBlock)]) ] = srcOutBlocks
       .join(srcFactorBlocks)
       .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
       .groupByKey(new ALSPartitioner(dstInBlocks.partitions.length))
 
-    val result: Double = 
-      dstInBlocks
-      .cogroup(srcOut,currentFactorBlocks)
-      .mapValues{case (block,factorTuple,fac) => 
-        computeSquaredError(block.head,factorTuple.head,fac.head)
+    val result: Double = dstInBlocks
+      .join(srcOut)
+      .join(currentFactorBlocks)
+      /*.map{(key,((block,factorTuple),fac) ) => computeSquaredError(block,factorTuple,fac)}*/
+      /*.cogroup(srcOut,currentFactorBlocks)*/
+      .mapValues{case ( (block,factorTuple),fac) => 
+        computeSquaredError(block,factorTuple,fac)
       }
       .values
       .reduce(_+_)

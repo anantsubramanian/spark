@@ -129,17 +129,17 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
     testALS(100, 200, 2, 15, 0.7, 0.4, numUserBlocks = 4, numProductBlocks = 2)
   }
 
-  test("pseudorandomness") {
-    val ratings = sc.parallelize(ALSSuite.generateRatings(10, 20, 5, 0.5, false, false)._1, 2)
-    val model11 = ALS.train(ratings, 5, 1, 1.0, 2, 1)
-    val model12 = ALS.train(ratings, 5, 1, 1.0, 2, 1)
-    val u11 = model11.userFeatures.values.flatMap(_.toList).collect().toList
-    val u12 = model12.userFeatures.values.flatMap(_.toList).collect().toList
-    val model2 = ALS.train(ratings, 5, 1, 1.0, 2, 2)
-    val u2 = model2.userFeatures.values.flatMap(_.toList).collect().toList
-    assert(u11 == u12)
-    assert(u11 != u2)
-  }
+  /*test("pseudorandomness") {*/
+  /*  val ratings = sc.parallelize(ALSSuite.generateRatings(10, 20, 5, 0.5, false, false)._1, 2)*/
+  /*  val model11 = ALS.train(ratings, 5, 1, 1.0, 2, 1)*/
+  /*  val model12 = ALS.train(ratings, 5, 1, 1.0, 2, 1)*/
+  /*  val u11 = model11.userFeatures.values.flatMap(_.toList).collect().toList*/
+  /*  val u12 = model12.userFeatures.values.flatMap(_.toList).collect().toList*/
+  /*  val model2 = ALS.train(ratings, 5, 1, 1.0, 2, 2)*/
+  /*  val u2 = model2.userFeatures.values.flatMap(_.toList).collect().toList*/
+  /*  assert(u11 == u12)*/
+  /*  assert(u11 != u2)*/
+  /*}*/
 
   test("Storage Level for RDDs in model") {
     val ratings = sc.parallelize(ALSSuite.generateRatings(10, 20, 5, 0.5, false, false)._1, 2)
@@ -167,24 +167,24 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
     assert(model.userFeatures.getStorageLevel == storageLevel);
   }
 
-  test("negative ids") {
-    val data = ALSSuite.generateRatings(50, 50, 2, 0.7, false, false)
-    val ratings = sc.parallelize(data._1.map { case Rating(u, p, r) =>
-      Rating(u - 25, p - 25, r)
-    })
-    val correct = data._2
-    val model = ALS.train(ratings, 5, 15)
+  /*test("negative ids") {*/
+  /*  val data = ALSSuite.generateRatings(50, 50, 2, 0.7, false, false)*/
+  /*  val ratings = sc.parallelize(data._1.map { case Rating(u, p, r) =>*/
+  /*    Rating(u - 25, p - 25, r)*/
+  /*  })*/
+  /*  val correct = data._2*/
+  /*  val model = ALS.train(ratings, 5, 15)*/
 
-    val pairs = Array.tabulate(50, 50)((u, p) => (u - 25, p - 25)).flatten
-    val ans = model.predict(sc.parallelize(pairs)).collect()
-    ans.foreach { r =>
-      val u = r.user + 25
-      val p = r.product + 25
-      val v = r.rating
-      val error = v - correct.get(u, p)
-      assert(math.abs(error) < 0.4)
-    }
-  }
+  /*  val pairs = Array.tabulate(50, 50)((u, p) => (u - 25, p - 25)).flatten*/
+  /*  val ans = model.predict(sc.parallelize(pairs)).collect()*/
+  /*  ans.foreach { r =>*/
+  /*    val u = r.user + 25*/
+  /*    val p = r.product + 25*/
+  /*    val v = r.rating*/
+  /*    val error = v - correct.get(u, p)*/
+  /*    assert(math.abs(error) < 0.4)*/
+  /*  }*/
+  /*}*/
 
   test("NNALS, rank 2") {
     testALS(100, 200, 2, 15, 0.7, 0.4, false, false, false, -1, -1, false)
@@ -195,7 +195,7 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
    *
    * @param users number of users
    * @param products number of products
-   * @param features number of features (rank of problem)
+   u @param features number of features (rank of problem)
    * @param iterations number of iterations to runPNCG
    * @param samplingRate what fraction of the user-product pairs are known
    * @param matchThreshold max difference allowed to consider a predicted rating correct
