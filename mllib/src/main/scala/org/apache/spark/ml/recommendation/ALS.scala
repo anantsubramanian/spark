@@ -524,7 +524,7 @@ object ALS extends Logging {
     var x: X = axpy(x0,direc,step)
     var f: Double = func(x)
     var k: Int = 1;
-    while (f0 - f >= step*dirProdGrad) 
+    while (f - f0 <= step*dirProdGrad) 
     {
       x = axpy(x0,direc,step)
       f = func(x)
@@ -1565,7 +1565,7 @@ object ALS extends Logging {
       }
     }
 
-    val counts = ratingBlocks
+    val counts: RDD[(Int, Array[Int])] = ratingBlocks
       .map{ case(key,block) => toUncompressedCols(key,block) } //(BlockId, (Int, Array[ID], Array[Int], Array[Float]) )
       .groupByKey(new ALSPartitioner(srcPart.numPartitions))
       .mapValues(toCounts)
@@ -1701,6 +1701,51 @@ object ALS extends Logging {
   }
 
   /**
+   * Evaluate the Tikhonov normalization for f(U,M)
+   *
+   * @param factors Array of Array[Float] factors; the item factors, m_i
+   * @param counts the number of ratings associated with each factor, Array[Int] 
+   * @param rank the size of a single factor vector
+   *
+   */
+  private def evalTikhonovNorm(
+      factors: RDD[(Int, FactorBlock)],
+      counts: RDD[(Int, Array[Int])],
+      rank: Int,
+      lambda: Double
+      ): Float = 
+  {
+    def evalBlockNorms(block: FactorBlock): Array[Float] = 
+    {
+      val numFactors: Int = block.length
+      val result: Array[Float] = new Array[Float](numFactors)
+      var j: Int = 0
+      while (j < numFactors) {
+        result(j)= blas.sdot(rank,block(j),1,block(j),1)
+      }
+      result
+    }
+    def scaleByNumRatings(factorNorms: Array[Float], numRatings: Array[Int]): Float =
+    {
+      val numFactors: Int = factorNorms.length
+      var result: Float = 0f
+      var j: Int = 0
+      while (j < numFactors) {
+        result += factorNorms(j) * numRatings(j)
+      }
+      result
+    }
+
+    val factorNorm: Float = factors
+      .mapValues{evalBlockNorms}
+      .join(counts)
+      .map{case (key,(f,n)) => scaleByNumRatings(f,n)}
+      .reduce(_ + _)
+
+    lambda.toFloat * factorNorm
+  }
+
+  /**
    * Compute the Frobenius norm part of the cost function for the current set of factors 
    *
    * @param srcFactorBlocks src factors
@@ -1716,7 +1761,7 @@ object ALS extends Logging {
    *
    * @return dst factors
    */
-  private def evalCostFunction[ID](
+  private def evalFrobeniusCost[ID](
       srcFactorBlocks: RDD[(Int, FactorBlock)],
       currentFactorBlocks: RDD[(Int, FactorBlock)],
       srcOutBlocks: RDD[(Int, OutBlock)],
@@ -1863,7 +1908,7 @@ object ALS extends Logging {
       val dstFactors = new Array[Array[Float]](len)
       var j = 0
       val normEqn = new NormalEquation(rank)
-     while (j < len) {
+      while (j < len) {
         normEqn.reset()
         if (implicitPrefs) {
           normEqn.merge(YtY.get)
