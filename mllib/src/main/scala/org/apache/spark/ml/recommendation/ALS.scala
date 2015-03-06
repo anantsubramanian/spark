@@ -524,15 +524,16 @@ object ALS extends Logging {
     var x: X = axpy(step,direc,x0)
     var f: Float = func(x)
     var k: Int = 1;
-    logStdout("lsearch: f0: " + f0);
+    logStdout("---------------------------");
+    logStdout("linesearch: f0: " + f0);
     logStdout("iter: alpha: f(x): [f-f0](x): c*m")
     logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
     while ( (f - f0 > step*dirProdGrad) && (k <= maxIters) )
     {
       // x = a*direc + x0
+      step = reduceFrac * step
       x = axpy(step,direc,x0)
       f = func(x)
-      step = reduceFrac * step
       k += 1
       logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
     }
@@ -886,12 +887,8 @@ object ALS extends Logging {
     var items_pc: FactorRDD = preconditionItems(users)
 
     // compute gradients; g = x - x_pc
-    var gradUser: FactorRDD = rddAXPY(-1.0f,users_pc,users)
-    var gradItem: FactorRDD = rddAXPY(-1.0f,items_pc,items)
-    /*var gradUser: FactorRDD = computeGradient(users,users_pc)*/
-    /*var gradItem: FactorRDD = computeGradient(items,items_pc)*/
-    /*gradUser.count()*/
-    /*gradItem.count()*/
+    var gradUser: FactorRDD = rddAXPY(-1.0f,users_pc,users).cache()
+    var gradItem: FactorRDD = rddAXPY(-1.0f,items_pc,items).cache()
 
     // initialize variables for the previous iteration's gradients
     var gradUser_old: FactorRDD = gradUser
@@ -908,27 +905,31 @@ object ALS extends Logging {
     var gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
     var gradTgrad_old = 0.0f;
 
-    var alpha_pncg: Float = 0.1f
+    var alpha_pncg: Float = 1f
     var beta_pncg: Float = gradTgrad
     //materialize rdds
     /*gradUser.count()*/
     /*gradItem.count()*/
 
-    logStdout("f(x) = " + costFunc(users,items))
-    logStdout("f(x_pc) = " + costFunc(users_pc,items_pc))
-    logStdout("iter: alpha: beta: <g,g>: <p,p>")
-    logStdout("0: "+alpha_pncg+": "+beta_pncg+": "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)))
-    for (iter <- 0 until maxIter) 
+    logStdout("iter: alpha: beta: <g,g>: <p,p>: f(u,m): f(u_pc,m_pc)")
+    logStdout("0: NaN: NaN: "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)) + ": " + costFunc(users,items) + ": " + costFunc(users_pc,items_pc))
+    for (iter <- 1 until maxIter+1) 
     {
       /*logStdout("iter " + iter)*/
       // store old preconditioned gradient vectors for computing \beta
       gradTgrad_old = gradTgrad
-      gradUser_old.unpersist()
-      gradItem_old.unpersist()
-      gradUser_old = gradUser
-      gradItem_old = gradItem
+      /*gradUser_old.unpersist()*/
+      /*gradItem_old.unpersist()*/
+      gradUser_old = gradUser.cache()
+      gradItem_old = gradItem.cache()
       gradUser_old.count()
       gradItem_old.count()
+
+      //maeterialize everything
+      users.count()
+      items.count()
+      direcUser.count()
+      direcItem.count()
 
       //ecompute alpha from linesearch()
       alpha_pncg = computeAlpha(
@@ -936,45 +937,58 @@ object ALS extends Logging {
         items,
         direcUser,
         direcItem,
-        0.1f,
+        10f,
         0.5f,
-        0.99f,
+        0.25f,
         10 
       )
       /*logStdout("alpha = " + alpha_pncg)*/
 
 
       // x_{k+1} = x_k + \alpha * p_k
+      users.count()
+      items.count()
       users = rddAXPY(alpha_pncg, direcUser, users).cache()
       items = rddAXPY(alpha_pncg, direcItem, items).cache()
+      users.count()
+      items.count()
+      logStdout("f_after_ls=" + costFunc((users,items)))
 
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
       users_pc = preconditionUsers(items).cache()
       items_pc = preconditionItems(users).cache()
+      users_pc.count()
+      items_pc.count()
+      logStdout("f_after_pc=" + costFunc((users,items)))
 
       // compute gradients
       // g = x_{k+1} - \bar{x} 
+      users.count()
+      items.count()
       gradUser = rddAXPY(-1.0f,users_pc,users).cache() // x - x_pc
       gradItem = rddAXPY(-1.0f,items_pc,items).cache() // x - x_pc
       gradUser.count()
       gradItem.count()
+      logStdout("f after modifying grad{User,Item}=" + costFunc((users,items)))
 
       // compute conjugate gradient beta parameter
       gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
       beta_pncg = gradTgrad / gradTgrad_old
-      gradUser_old.unpersist()
-      gradItem_old.unpersist()
+
+      /*logStdout("beta=" + beta_pncg)*/
+      logStdout("f_before modifying direcUser=" + costFunc((users,items)))
 
       // p_{k+1} = -g + \beta * p_k
       direcUser = rddAXPBY(-1.0f,gradUser,beta_pncg,direcUser).cache()
-      direcUser.count()
-
       direcItem = rddAXPBY(-1.0f,gradItem,beta_pncg,direcItem).cache()
+      direcUser.count()
       direcItem.count()
 
-      logStdout(iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad+": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)))
+      logStdout(iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad+": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem))+ ": " + costFunc((users,items))+ ": " + costFunc((users_pc,items_pc)))
 
+      /*gradUser_old.unpersist()*/
+      /*gradItem_old.unpersist()*/
     }
 
     val userIdAndFactors = userInBlocks
@@ -1826,9 +1840,6 @@ object ALS extends Logging {
       // loop over all users {u_i}
       while (i < len) 
       {
-        // inialize grad(i) to zero
-        /*ju.Arrays.fill(grad(i), 0.0f)*/
-
         // loop over all input {m_j} in block
         var j = block.dstPtrs(i)
         var num_factors = 0
