@@ -524,18 +524,19 @@ object ALS extends Logging {
     var x: X = axpy(step,direc,x0)
     var f: Float = func(x)
     var k: Int = 1;
-    logStdout("-----l-search---------------------");
+    logStdout("lsearch: f0: " + f0);
     logStdout("iter: alpha: f(x): [f-f0](x): c*m")
+    logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
     while ( (f - f0 > step*dirProdGrad) && (k <= maxIters) )
     {
-      logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
       // x = a*direc + x0
       x = axpy(step,direc,x0)
       f = func(x)
       step = reduceFrac * step
       k += 1
+      logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
     }
-    logStdout("-----l-search---------------------");
+    logStdout("---------------------------");
     step
   }
     
@@ -786,6 +787,35 @@ object ALS extends Logging {
       }
     }
 
+    type FacTup = (FactorRDD,FactorRDD) // (user,items)
+    def costFunc(x: FacTup): Float =
+    {
+      val usr = x._1
+      val itm = x._2
+      val sumSquaredErr: Float = evalFrobeniusCost(
+        itm, 
+        usr, 
+        itemOutBlocks, 
+        userInBlocks, 
+        rank, 
+        regParam,
+        itemLocalIndexEncoder
+      )  
+      val usrNorm: Float = evalTikhonovNorm(
+        usr, 
+        userCounts,
+        rank,
+        regParam
+      ) 
+      val itmNorm: Float = evalTikhonovNorm(
+        itm, 
+        itemCounts,
+        rank,
+        regParam
+      )
+      sumSquaredErr + usrNorm + itmNorm
+    }
+
     def computeAlpha(
         userFac: FactorRDD,
         itemFac: FactorRDD,
@@ -796,35 +826,6 @@ object ALS extends Logging {
         gradFrac: Float,
         maxIters: Int): Float = 
     {
-      type FacTup = (FactorRDD,FactorRDD) // (user,items)
-
-      def func(x: FacTup): Float =
-      {
-        val usr = x._1
-        val itm = x._2
-        val sumSquaredErr: Float = evalFrobeniusCost(
-          itm, 
-          usr, 
-          itemOutBlocks, 
-          userInBlocks, 
-          rank, 
-          regParam,
-          itemLocalIndexEncoder
-        )  
-        val usrNorm: Float = evalTikhonovNorm(
-          usr, 
-          userCounts,
-          rank,
-          regParam
-        ) 
-        val itmNorm: Float = evalTikhonovNorm(
-          itm, 
-          itemCounts,
-          rank,
-          regParam
-        )
-        sumSquaredErr + usrNorm + itmNorm
-      }
 
       def axpy(a: Float, x: FacTup, y: FacTup): FacTup = {
         (rddAXPY(a,x._1,y._1),rddAXPY(a,x._2,y._2))
@@ -855,7 +856,7 @@ object ALS extends Logging {
       }
 
       linesearch(
-        func,
+        costFunc,
         axpy,
         (userFac,itemFac),
         (userDirec,itemDirec),
@@ -902,19 +903,21 @@ object ALS extends Logging {
     direcUser.count()
     direcItem.count()
 
-    var alpha_pncg: Float = 0.5f
-    var beta_pncg: Float = 1.0f
 
     // compute g^T * g
     var gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
     var gradTgrad_old = 0.0f;
 
+    var alpha_pncg: Float = 0.1f
+    var beta_pncg: Float = gradTgrad
     //materialize rdds
     /*gradUser.count()*/
     /*gradItem.count()*/
 
-    logStdout("iter: alpha: beta: <g,g>")
-    logStdout("0: "+alpha_pncg+": "+beta_pncg+": "+gradTgrad)
+    logStdout("f(x) = " + costFunc(users,items))
+    logStdout("f(x_pc) = " + costFunc(users_pc,items_pc))
+    logStdout("iter: alpha: beta: <g,g>: <p,p>")
+    logStdout("0: "+alpha_pncg+": "+beta_pncg+": "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)))
     for (iter <- 0 until maxIter) 
     {
       /*logStdout("iter " + iter)*/
@@ -933,61 +936,45 @@ object ALS extends Logging {
         items,
         direcUser,
         direcItem,
-        beta_pncg,
+        0.1f,
         0.5f,
-        0.5f,
-        5
+        0.99f,
+        10 
       )
       /*logStdout("alpha = " + alpha_pncg)*/
 
 
       // x_{k+1} = x_k + \alpha * p_k
-      /*logStdout("Updating x_{k+1} = x_k + alpha * p_k")*/
       users = rddAXPY(alpha_pncg, direcUser, users).cache()
       items = rddAXPY(alpha_pncg, direcItem, items).cache()
-      /*users.count()*/
-      /*items.count()*/
 
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
-      /*logStdout("Updating ~x = P*x_{k+1}")*/
       users_pc = preconditionUsers(items).cache()
       items_pc = preconditionItems(users).cache()
-      /*logStdout("Materializing x,~x")*/
-      /*users_pc.count()*/
-      /*items_pc.count()*/
-      /*users.count()*/
-      /*items.count()*/
 
       // compute gradients
       // g = x_{k+1} - \bar{x} 
-      /*gradUser = computeGradient(users,users_pc)*/
       gradUser = rddAXPY(-1.0f,users_pc,users).cache() // x - x_pc
       gradItem = rddAXPY(-1.0f,items_pc,items).cache() // x - x_pc
-      /*gradItem = computeGradient(items,items_pc)*/
-      /*logStdout("Materializing g = x - ~x")*/
       gradUser.count()
       gradItem.count()
 
       // compute conjugate gradient beta parameter
       gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
-      /*logStdout("<g,g> = " + gradTgrad)*/
       beta_pncg = gradTgrad / gradTgrad_old
-      /*logStdout("beta = " + beta_pncg)*/
-      /*gradUser_old.unpersist()*/
-      /*gradItem_old.unpersist()*/
+      gradUser_old.unpersist()
+      gradItem_old.unpersist()
 
-      // p_{k+1} = g - \beta * p_k
-      /*direcUser.count()*/
-      /*logStdout("Updating p_{k+1} = g - beta * p_k")*/
+      // p_{k+1} = -g + \beta * p_k
       direcUser = rddAXPBY(-1.0f,gradUser,beta_pncg,direcUser).cache()
       direcUser.count()
 
-      /*direcItem.count()*/
       direcItem = rddAXPBY(-1.0f,gradItem,beta_pncg,direcItem).cache()
       direcItem.count()
 
-      logStdout(iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad)
+      logStdout(iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad+": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)))
+
     }
 
     val userIdAndFactors = userInBlocks
