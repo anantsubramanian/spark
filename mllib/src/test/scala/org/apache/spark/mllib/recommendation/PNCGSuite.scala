@@ -97,7 +97,7 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*}*/
 
   test("rank-2 matrices") {
-    testALS(100, 200, 2, 15, 0.7, 0.3)
+    testALS(50, 100, 2, 15, 0.7, 0.3)
   }
 
   /*test("rank-2 matrices bulk") {*/
@@ -125,9 +125,9 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*  testALS(100, 200, 2, 15, 0.7, 0.4, true, false, true)*/
   /*}*/
 
-  test("rank-2 matrices with different user and product blocks") {
-    testALS(100, 200, 2, 15, 0.7, 0.4, numUserBlocks = 4, numProductBlocks = 2)
-  }
+  /*test("rank-2 matrices with different user and product blocks") {*/
+  /*  testALS(100, 200, 2, 15, 0.7, 0.4, numUserBlocks = 4, numProductBlocks = 2)*/
+  /*}*/
 
   /*test("pseudorandomness") {*/
   /*  val ratings = sc.parallelize(ALSSuite.generateRatings(10, 20, 5, 0.5, false, false)._1, 2)*/
@@ -186,9 +186,9 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*  }*/
   /*}*/
 
-  test("NNALS, rank 2") {
-    testALS(100, 200, 2, 15, 0.7, 0.4, false, false, false, -1, -1, false)
-  }
+  /*test("NNALS, rank 2") {*/
+  /*  testALS(100, 200, 2, 15, 0.7, 0.4, false, false, false, -1, -1, false)*/
+  /*}*/
 
   /**
    * Test if we can correctly factorize R = U * P where U and P are of known rank.

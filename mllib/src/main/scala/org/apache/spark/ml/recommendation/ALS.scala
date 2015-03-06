@@ -509,29 +509,33 @@ object ALS extends Logging {
    *
    */
   def linesearch[X](
-      func: (X) => Double, 
-      axpy: (X,X,Double) => X,
+      func: (X) => Float, 
+      axpy: (Float,X,X) => X,
       x0: X, 
       direc: X,
-      reduceFrac: Double,
-      initStep: Double,
-      dirProdGrad: Double
-      ): Double = 
+      reduceFrac: Float,
+      initStep: Float,
+      dirProdGrad: Float,
+      maxIters: Int = 10
+      ): Float = 
   {
-    val f0: Double = func(x0)
-
-    var step: Double = initStep
-    var x: X = axpy(x0,direc,step)
-    var f: Double = func(x)
+    val f0: Float = func(x0)
+    var step: Float = initStep
+    var x: X = axpy(step,direc,x0)
+    var f: Float = func(x)
     var k: Int = 1;
-    while (f - f0 > step*dirProdGrad) 
+    logStdout("-----l-search---------------------");
+    logStdout("iter: alpha: f(x): [f-f0](x): c*m")
+    while ( (f - f0 > step*dirProdGrad) && (k <= maxIters) )
     {
+      logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
       // x = a*direc + x0
-      x = axpy(direc,x0,step)
+      x = axpy(step,direc,x0)
       f = func(x)
       step = reduceFrac * step
-      logStdout("linesearch: " + k + ": alpha: " + step + ": f(x): " + f)
+      k += 1
     }
+    logStdout("-----l-search---------------------");
     step
   }
     
@@ -586,6 +590,7 @@ object ALS extends Logging {
 
     // materialize blockRatings and user blocks
     userOutBlocks.count()
+    userCounts.count()
 
     val swappedBlockRatings = blockRatings.map {
       case ((userBlockId, itemBlockId), RatingBlock(userIds, itemIds, localRatings)) =>
@@ -599,6 +604,7 @@ object ALS extends Logging {
 
     // materialize item blocks
     itemOutBlocks.count()
+    itemCounts.count()
 
 
     type FactorRDD = RDD[(Int,FactorBlock)]
@@ -651,7 +657,7 @@ object ALS extends Logging {
      * @param y a vector represented as a FactorBlock
      * @param a a scalar
      */
-    def blockAXPBY(x: FactorBlock, y: FactorBlock, a: Float, b: Float): FactorBlock =
+    def blockAXPBY(a: Float, x: FactorBlock, b: Float, y: FactorBlock): FactorBlock =
     {
       val numVectors = x.length
       val result: FactorBlock = Array.ofDim[Array[Float]](numVectors)
@@ -671,11 +677,11 @@ object ALS extends Logging {
 
     /** 
      * compute a*x + y, and return a new factor block 
+     * @param a a scalar
      * @param x a vector represented as a FactorBlock
      * @param y a vector represented as a FactorBlock
-     * @param a a scalar
      */
-    def blockAXPY(x: FactorBlock, y: FactorBlock, a: Float): FactorBlock =
+    def blockAXPY(a: Float, x: FactorBlock, y: FactorBlock): FactorBlock =
     {
       val numVectors = x.length
       val result: FactorBlock = Array.ofDim[Array[Float]](numVectors)
@@ -763,8 +769,8 @@ object ALS extends Logging {
      * @param a a scalar
      * @param b a scalar
      */
-    def rddAXPBY(x: FactorRDD, y: FactorRDD, a: Float, b: Float): FactorRDD = {
-      x.join(y).mapValues{case(xblock,yblock) => blockAXPBY(xblock,yblock,a,b)}
+    def rddAXPBY(a: Float, x: FactorRDD, b: Float, y: FactorRDD): FactorRDD = {
+      x.join(y).mapValues{case(xblock,yblock) => blockAXPBY(a,xblock,b,yblock)}
     }
 
     /** 
@@ -773,37 +779,93 @@ object ALS extends Logging {
      * @param y an RDD of vectors represented as a FactorBlock
      * @param a a scalar
      */
-    def rddAXPY(x: FactorRDD, y: FactorRDD, a: Float): FactorRDD = {
-      x.join(y).mapValues{case(xblock,yblock) => blockAXPY(xblock,yblock,a)}
-      /*x.join(y).mapValues{case(xblock,yblock) => xblock}*/
-    }
-
-    /** 
-     * Compute the gradient g = x - x_preconditioned
-     * @param x current vector
-     * @param x_pc preconditioned vector
-     */
-    /*def computeGradient(x: FactorRDD, x_pc: FactorRDD): FactorRDD = {*/
-    /*  x.join(x_pc).mapValues{case(v1,v2) => blockAXPY(v2,v1,-1.0f)}*/
-    /*}*/
-
-    /**
-     * todo: backtracking linesearch 
-     */
-    def backtrackLinesearch(
-        usr: FactorRDD, 
-        mov: FactorRDD, 
-        udirec: FactorRDD,
-        mdirec: FactorRDD,
-        c: Float, 
-        m: Float, 
-        alpha0: Float): Float = 
+    def rddAXPY(a: Float, x: FactorRDD, y: FactorRDD): FactorRDD = 
     {
-      val t: Float = -c * m
-      var alpha_ls = alpha0
-      alpha_ls
+      x.join(y).mapValues{case (xblock,yblock) => 
+        blockAXPY(a,xblock,yblock)
+      }
     }
-    
+
+    def computeAlpha(
+        userFac: FactorRDD,
+        itemFac: FactorRDD,
+        userDirec: FactorRDD,
+        itemDirec: FactorRDD,
+        initStep: Float,
+        reduceFrac: Float,
+        gradFrac: Float,
+        maxIters: Int): Float = 
+    {
+      type FacTup = (FactorRDD,FactorRDD) // (user,items)
+
+      def func(x: FacTup): Float =
+      {
+        val usr = x._1
+        val itm = x._2
+        val sumSquaredErr: Float = evalFrobeniusCost(
+          itm, 
+          usr, 
+          itemOutBlocks, 
+          userInBlocks, 
+          rank, 
+          regParam,
+          itemLocalIndexEncoder
+        )  
+        val usrNorm: Float = evalTikhonovNorm(
+          usr, 
+          userCounts,
+          rank,
+          regParam
+        ) 
+        val itmNorm: Float = evalTikhonovNorm(
+          itm, 
+          itemCounts,
+          rank,
+          regParam
+        )
+        sumSquaredErr + usrNorm + itmNorm
+      }
+
+      def axpy(a: Float, x: FacTup, y: FacTup): FacTup = {
+        (rddAXPY(a,x._1,y._1),rddAXPY(a,x._2,y._2))
+      }
+
+      def gradientProdDirec(): Float = 
+      {
+        val userGrad: FactorRDD = evalGradient(
+          itemFac, 
+          userFac,
+          itemOutBlocks, 
+          userInBlocks, 
+          rank, 
+          regParam,
+          itemLocalIndexEncoder
+        )
+
+        val itemGrad: FactorRDD = evalGradient(
+          userFac,
+          itemFac, 
+          userOutBlocks, 
+          itemInBlocks, 
+          rank, 
+          regParam,
+          userLocalIndexEncoder
+        )
+        rddDOT(userGrad,userDirec) + rddDOT(itemGrad,itemDirec)
+      }
+
+      linesearch(
+        func,
+        axpy,
+        (userFac,itemFac),
+        (userDirec,itemDirec),
+        reduceFrac,
+        initStep,
+        gradFrac * gradientProdDirec(),
+        maxIters
+      )
+    }
+        
     /* initialize the factor vectors for:
      * user, item  -- user/item factors
      * grad -- gradient of f(U,M)
@@ -823,8 +885,8 @@ object ALS extends Logging {
     var items_pc: FactorRDD = preconditionItems(users)
 
     // compute gradients; g = x - x_pc
-    var gradUser: FactorRDD = rddAXPY(users_pc,users,-1.0f)
-    var gradItem: FactorRDD = rddAXPY(items_pc,items,-1.0f)
+    var gradUser: FactorRDD = rddAXPY(-1.0f,users_pc,users)
+    var gradItem: FactorRDD = rddAXPY(-1.0f,items_pc,items)
     /*var gradUser: FactorRDD = computeGradient(users,users_pc)*/
     /*var gradItem: FactorRDD = computeGradient(items,items_pc)*/
     /*gradUser.count()*/
@@ -837,26 +899,25 @@ object ALS extends Logging {
     // initial search direction to -gradient (steepest descent direction)
     var direcUser: FactorRDD = gradUser.mapValues{x => blockSCAL(x,-1.0f)}
     var direcItem: FactorRDD = gradItem.mapValues{x => blockSCAL(x,-1.0f)}
-    logStdout("Materializing directions")
     direcUser.count()
     direcItem.count()
 
-    var alpha_pncg: Float = 0.0f
-    var beta_pncg: Float = 0.0f
+    var alpha_pncg: Float = 0.5f
+    var beta_pncg: Float = 1.0f
 
     // compute g^T * g
     var gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
     var gradTgrad_old = 0.0f;
-    logStdout("<g,g> = " + gradTgrad)
 
     //materialize rdds
     /*gradUser.count()*/
     /*gradItem.count()*/
 
-    logStdout("Starting iteration loop")
+    logStdout("iter: alpha: beta: <g,g>")
+    logStdout("0: "+alpha_pncg+": "+beta_pncg+": "+gradTgrad)
     for (iter <- 0 until maxIter) 
     {
-      logStdout("iter " + iter)
+      /*logStdout("iter " + iter)*/
       // store old preconditioned gradient vectors for computing \beta
       gradTgrad_old = gradTgrad
       gradUser_old.unpersist()
@@ -867,23 +928,32 @@ object ALS extends Logging {
       gradItem_old.count()
 
       //ecompute alpha from linesearch()
-      alpha_pncg = 1.0f; 
-      logStdout("alpha = " + alpha_pncg)
+      alpha_pncg = computeAlpha(
+        users,
+        items,
+        direcUser,
+        direcItem,
+        beta_pncg,
+        0.5f,
+        0.5f,
+        5
+      )
+      /*logStdout("alpha = " + alpha_pncg)*/
 
 
       // x_{k+1} = x_k + \alpha * p_k
-      logStdout("Updating x_{k+1} = x_k + alpha * p_k")
-      users = rddAXPY(direcUser, users, alpha_pncg).cache()
-      items = rddAXPY(direcItem, items, alpha_pncg).cache()
+      /*logStdout("Updating x_{k+1} = x_k + alpha * p_k")*/
+      users = rddAXPY(alpha_pncg, direcUser, users).cache()
+      items = rddAXPY(alpha_pncg, direcItem, items).cache()
       /*users.count()*/
       /*items.count()*/
 
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
-      logStdout("Updating ~x = P*x_{k+1}")
+      /*logStdout("Updating ~x = P*x_{k+1}")*/
       users_pc = preconditionUsers(items).cache()
       items_pc = preconditionItems(users).cache()
-      logStdout("Materializing x,~x")
+      /*logStdout("Materializing x,~x")*/
       /*users_pc.count()*/
       /*items_pc.count()*/
       /*users.count()*/
@@ -892,30 +962,32 @@ object ALS extends Logging {
       // compute gradients
       // g = x_{k+1} - \bar{x} 
       /*gradUser = computeGradient(users,users_pc)*/
-      gradUser = rddAXPY(users_pc,users,-1.0f).cache() // x - x_pc
-      gradItem = rddAXPY(items_pc,items,-1.0f).cache() // x - x_pc
+      gradUser = rddAXPY(-1.0f,users_pc,users).cache() // x - x_pc
+      gradItem = rddAXPY(-1.0f,items_pc,items).cache() // x - x_pc
       /*gradItem = computeGradient(items,items_pc)*/
-      logStdout("Materializing g = x - ~x")
+      /*logStdout("Materializing g = x - ~x")*/
       gradUser.count()
       gradItem.count()
 
       // compute conjugate gradient beta parameter
       gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
-      logStdout("<g,g> = " + gradTgrad)
+      /*logStdout("<g,g> = " + gradTgrad)*/
       beta_pncg = gradTgrad / gradTgrad_old
-      logStdout("beta = " + beta_pncg)
+      /*logStdout("beta = " + beta_pncg)*/
       /*gradUser_old.unpersist()*/
       /*gradItem_old.unpersist()*/
 
       // p_{k+1} = g - \beta * p_k
       /*direcUser.count()*/
-      logStdout("Updating p_{k+1} = g - beta * p_k")
-      direcUser = rddAXPBY(gradUser,direcUser,-1.0f,beta_pncg).cache()
+      /*logStdout("Updating p_{k+1} = g - beta * p_k")*/
+      direcUser = rddAXPBY(-1.0f,gradUser,beta_pncg,direcUser).cache()
       direcUser.count()
 
       /*direcItem.count()*/
-      direcItem = rddAXPBY(gradItem,direcItem,-1.0f,beta_pncg).cache()
+      direcItem = rddAXPBY(-1.0f,gradItem,beta_pncg,direcItem).cache()
       direcItem.count()
+
+      logStdout(iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad)
     }
 
     val userIdAndFactors = userInBlocks
@@ -1030,8 +1102,9 @@ object ALS extends Logging {
       var k = 0
       while (k < numVectors)
       {
-        norm = blas.snrm2(rank,x(k),1)
-        result += norm * norm
+        /*norm = blas.snrm2(rank,x(k),1)*/
+        /*result += norm * norm*/
+        result += blas.sdot(rank,x(k),1,x(k),1)
         k += 1
       }
       result
@@ -1888,7 +1961,7 @@ object ALS extends Logging {
       srcEncoder: LocalIndexEncoder,
       implicitPrefs: Boolean = false,
       alpha: Double = 1.0
-      ): Double = 
+      ): Float = 
     {
 
     val numSrcBlocks = srcFactorBlocks.partitions.length
@@ -1964,7 +2037,7 @@ object ALS extends Logging {
       .values
       .reduce(_+_)
 
-    result
+    result.toFloat
   }
 
 
