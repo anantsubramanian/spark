@@ -886,8 +886,27 @@ object ALS extends Logging {
     var items: FactorRDD = initialize(itemInBlocks, rank, seedGen.nextLong())
 
     // run ALS preconditioner on the user/item vectors
-    var users_pc: FactorRDD = preconditionUsers(items)
-    var items_pc: FactorRDD = preconditionItems(users)
+   /* var users_pc: FactorRDD = computeFactors(items, */
+   /*     itemOutBlocks, */
+   /*     userInBlocks, */
+   /*     rank, */
+   /*     regParam,*/
+   /*     itemLocalIndexEncoder, */
+   /*     solver = solver)*/
+
+   /*var items_pc = computeFactors(users_pc, */
+   /*     userOutBlocks, */
+   /*     itemInBlocks, */
+   /*     rank, */
+   /*     regParam,*/
+   /*     userLocalIndexEncoder, */
+   /*     solver = solver)*/
+
+    var users_pc: FactorRDD = preconditionUsers(items).cache()
+    var items_pc: FactorRDD = preconditionItems(users_pc).cache()
+    /*users_pc.count()*/
+    /*items_pc.count()*/
+    /*logStdout("PNCG: " + costFunc(users_pc,items_pc))*/
 
     // compute gradients; g = x - x_pc
     var gradUser: FactorRDD = rddAXPY(-1.0f,users_pc,users).cache()
@@ -909,13 +928,13 @@ object ALS extends Logging {
     var gradTgrad_old = 0.0f;
 
     var beta_pncg: Float = gradTgrad
-    var alpha_pncg: Float = beta_pncg
+    var alpha_pncg: Float = 1.0f
     //materialize rdds
     /*gradUser.count()*/
     /*gradItem.count()*/
 
-    logStdout("iter: alpha: beta: <g,g>: <p,p>: f(u,m): f(u_pc,m_pc)")
-    logStdout("0: NaN: NaN: "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)) + ": " + costFunc(users,items) + ": " + costFunc(users_pc,items_pc))
+    logStdout("PNCG: iter: alpha: beta: <g,g>: <p,p>: f(u,m): f(u_pc,m_pc)")
+    logStdout("PNCG: 0: NaN: NaN: "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)) + ": " + costFunc(users,items) + ": " + costFunc(users_pc,items_pc))
     var iter: Int = 1
     for (iter <- 1 until maxIter+1) 
     /*while (iter < maxIter+1)*/
@@ -945,7 +964,7 @@ object ALS extends Logging {
         items,
         direcUser,
         direcItem,
-        alpha_pncg,
+        2*alpha_pncg,
         0.5f,
         0.5f,
         10
@@ -966,8 +985,7 @@ object ALS extends Logging {
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
       users_pc = preconditionUsers(items).cache()
-      items_pc = preconditionItems(users).cache()
-      users_pc.count()
+      items_pc = preconditionItems(users_pc).cache()
       items_pc.count()
       /*logStdout("f_after_pc=" + costFunc((users,items)))*/
 
@@ -985,7 +1003,7 @@ object ALS extends Logging {
       gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
       /*logStdout("f_after calc (gradTgrad=" + gradTgrad + ") =" + costFunc((users,items)))*/
       beta_pncg = gradTgrad / gradTgrad_old
-      logStdout("materliazizing beta=" + beta_pncg)
+      /*logStdout("materliazizing beta=" + beta_pncg)*/
 
       /*logStdout("beta=" + beta_pncg)*/
       /*logStdout("f_before modifying direcUser=" + costFunc((users,items)))*/
@@ -996,7 +1014,7 @@ object ALS extends Logging {
       direcUser.count()
       direcItem.count()
 
-      logStdout(iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad+": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem))+ ": " + costFunc((users,items))+ ": " + costFunc((users_pc,items_pc)))
+      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad+": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem))+ ": " + costFunc((users,items))+ ": " + costFunc((users_pc,items_pc)))
 
       /*gradUser_old.unpersist()*/
       /*gradItem_old.unpersist()*/
@@ -1151,8 +1169,42 @@ object ALS extends Logging {
       math.sqrt(rddNORMSQR(xs).toDouble).toFloat
     }
 
+    type FacTup = (FactorRDD,FactorRDD) // (user,items)
+    def costFunc(x: FacTup): Float =
+    {
+      val usr = x._1
+      val itm = x._2
+      val sumSquaredErr: Float = evalFrobeniusCost(
+        itm, 
+        usr, 
+        itemOutBlocks, 
+        userInBlocks, 
+        rank, 
+        regParam,
+        itemLocalIndexEncoder
+      )  
+      val usrNorm: Float = evalTikhonovNorm(
+        usr, 
+        userCounts,
+        rank,
+        regParam
+      ) 
+      val itmNorm: Float = evalTikhonovNorm(
+        itm, 
+        itemCounts,
+        rank,
+        regParam
+      )
+      sumSquaredErr + usrNorm + itmNorm
+    }
 
-    logStdout("f(u,m): ||g_u||^2: ||g_m||^2 ")
+
+
+    logStdout("ALS: f(u,m): ||g_u||^2: ||g_m||^2 ")
+    /*var n = evalTikhonovNorm(itemFactors, itemCounts, rank, regParam) + evalTikhonovNorm(userFactors, userCounts, rank, regParam)*/
+    /*logStdout("lambda * sum ||m_i||^2 = " + n )*/
+    /*var f = evalFrobeniusCost(itemFactors, userFactors, itemOutBlocks, userInBlocks, rank, regParam, itemLocalIndexEncoder)*/
+    logStdout("ALS: 0: "+ costFunc((userFactors,itemFactors)) +": NaN: NaN")
     if (implicitPrefs) {
       for (iter <- 1 to maxIter) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1170,25 +1222,13 @@ object ALS extends Logging {
         previousUserFactors.unpersist()
       }
     } else {
-      for (iter <- 0 until maxIter) {
+      for (iter <- 1 until maxIter) {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
           userLocalIndexEncoder, solver = solver)
-        /*var f = evalFrobeniusCost(userFactors, itemFactors, userOutBlocks, itemInBlocks, rank, regParam,*/
-        /*  userLocalIndexEncoder)*/
-        /*logStdout("f(u,m) = " + f + " (pt 1)")*/
-        var n = evalTikhonovNorm(itemFactors, itemCounts, rank, regParam)
-        /*logStdout("lambda * sum ||m_i||^2 = " + n )*/
 
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
           itemLocalIndexEncoder, solver = solver)
 
-        var f = evalFrobeniusCost(itemFactors, userFactors, itemOutBlocks, userInBlocks, rank, regParam,
-          itemLocalIndexEncoder)
-        /*logStdout("f(u,m) = " + f + " (pt 2)")*/
-
-        n += evalTikhonovNorm(userFactors, userCounts, rank, regParam)
-        /*logStdout("lambda * sum ||u_i||^2 = " + n )*/
-        /*logStdout("f(u,m) = " + (f + n))*/
         val gu = evalGradient(
           itemFactors, 
           userFactors,
@@ -1198,8 +1238,6 @@ object ALS extends Logging {
           regParam,
           itemLocalIndexEncoder
         )
-        /*logStdout("||g_u|| = " + rddNORMSQR(gu))*/
-        /*logStdout("||g_m|| = " + rddNORMSQR(gm))*/
         val gm = evalGradient(
           userFactors,
           itemFactors, 
@@ -1209,8 +1247,7 @@ object ALS extends Logging {
           regParam,
           userLocalIndexEncoder
         )
-        /*logStdout("||g_m|| = " + rddNORMSQR(gm))*/
-        logStdout(iter +": "+ (f + n) +": "+ rddNORMSQR(gu) +": "+ rddNORMSQR(gm))
+        logStdout("ALS:" + iter +": "+ costFunc((userFactors,itemFactors)) +": "+ rddNORMSQR(gu) +": "+ rddNORMSQR(gm))
       }
     }
     val userIdAndFactors = userInBlocks

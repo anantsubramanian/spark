@@ -97,7 +97,8 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*}*/
 
   test("rank-2 matrices") {
-    testALS(200, 100, 10, 10, 0.7, 0.3)
+    testALSorig(3000, 1000, 10, 10, 0.7, 100)
+    testALS(3000, 1000, 10, 10, 0.7, 100)
   }
 
   /*test("rank-2 matrices bulk") {*/
@@ -141,31 +142,31 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*  assert(u11 != u2)*/
   /*}*/
 
-  test("Storage Level for RDDs in model") {
-    val ratings = sc.parallelize(ALSSuite.generateRatings(10, 20, 5, 0.5, false, false)._1, 2)
-    var storageLevel = StorageLevel.MEMORY_ONLY
-    var model = new ALS()
-      .setRank(5)
-      .setIterations(1)
-      .setLambda(1.0)
-      .setBlocks(2)
-      .setSeed(1)
-      .setFinalRDDStorageLevel(storageLevel)
-      .runPNCG(ratings)
-    assert(model.productFeatures.getStorageLevel == storageLevel);
-    assert(model.userFeatures.getStorageLevel == storageLevel);
-    storageLevel = StorageLevel.DISK_ONLY
-    model = new ALS()
-      .setRank(5)
-      .setIterations(1)
-      .setLambda(1.0)
-      .setBlocks(2)
-      .setSeed(1)
-      .setFinalRDDStorageLevel(storageLevel)
-      .runPNCG(ratings)
-    assert(model.productFeatures.getStorageLevel == storageLevel);
-    assert(model.userFeatures.getStorageLevel == storageLevel);
-  }
+  /*test("Storage Level for RDDs in model") {*/
+  /*  val ratings = sc.parallelize(ALSSuite.generateRatings(10, 20, 5, 0.5, false, false)._1, 2)*/
+  /*  var storageLevel = StorageLevel.MEMORY_ONLY*/
+  /*  var model = new ALS()*/
+  /*    .setRank(5)*/
+  /*    .setIterations(1)*/
+  /*    .setLambda(1.0)*/
+  /*    .setBlocks(2)*/
+  /*    .setSeed(1)*/
+  /*    .setFinalRDDStorageLevel(storageLevel)*/
+  /*    .runPNCG(ratings)*/
+  /*  assert(model.productFeatures.getStorageLevel == storageLevel);*/
+  /*  assert(model.userFeatures.getStorageLevel == storageLevel);*/
+  /*  storageLevel = StorageLevel.DISK_ONLY*/
+  /*  model = new ALS()*/
+  /*    .setRank(5)*/
+  /*    .setIterations(1)*/
+  /*    .setLambda(1.0)*/
+  /*    .setBlocks(2)*/
+  /*    .setSeed(1)*/
+  /*    .setFinalRDDStorageLevel(storageLevel)*/
+  /*    .runPNCG(ratings)*/
+  /*  assert(model.productFeatures.getStorageLevel == storageLevel);*/
+  /*  assert(model.userFeatures.getStorageLevel == storageLevel);*/
+  /*}*/
 
   /*test("negative ids") {*/
   /*  val data = ALSSuite.generateRatings(50, 50, 2, 0.7, false, false)*/
@@ -233,6 +234,83 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
       .setSeed(0L)
       .setNonnegative(!negativeFactors)
       .runPNCG(sc.parallelize(sampledRatings))
+
+    val predictedU = new DoubleMatrix(users, features)
+    for ((u, vec) <- model.userFeatures.collect(); i <- 0 until features) {
+      predictedU.put(u, i, vec(i))
+    }
+    val predictedP = new DoubleMatrix(products, features)
+    for ((p, vec) <- model.productFeatures.collect(); i <- 0 until features) {
+      predictedP.put(p, i, vec(i))
+    }
+    val predictedRatings = bulkPredict match {
+      case false => predictedU.mmul(predictedP.transpose)
+      case true =>
+        val allRatings = new DoubleMatrix(users, products)
+        val usersProducts = for (u <- 0 until users; p <- 0 until products) yield (u, p)
+        val userProductsRDD = sc.parallelize(usersProducts)
+        model.predict(userProductsRDD).collect().foreach { elem =>
+          allRatings.put(elem.user, elem.product, elem.rating)
+        }
+        allRatings
+    }
+
+    if (!implicitPrefs) {
+      for (u <- 0 until users; p <- 0 until products) {
+        val prediction = predictedRatings.get(u, p)
+        val correct = trueRatings.get(u, p)
+        if (math.abs(prediction - correct) > matchThreshold) {
+          fail(("Model failed to predict (%d, %d): %f vs %f\ncorr: %s\npred: %s\nU: %s\n P: %s")
+            .format(u, p, correct, prediction, trueRatings, predictedRatings, predictedU,
+              predictedP))
+        }
+      }
+    } else {
+      // For implicit prefs we use the confidence-weighted RMSE to test (ref Mahout's tests)
+      var sqErr = 0.0
+      var denom = 0.0
+      for (u <- 0 until users; p <- 0 until products) {
+        val prediction = predictedRatings.get(u, p)
+        val truePref = truePrefs.get(u, p)
+        val confidence = 1 + 1.0 * abs(trueRatings.get(u, p))
+        val err = confidence * (truePref - prediction) * (truePref - prediction)
+        sqErr += err
+        denom += confidence
+      }
+      val rmse = math.sqrt(sqErr / denom)
+      if (rmse > matchThreshold) {
+        fail("Model failed to predict RMSE: %f\ncorr: %s\npred: %s\nU: %s\n P: %s".format(
+          rmse, truePrefs, predictedRatings, predictedU, predictedP))
+      }
+    }
+  }
+  def testALSorig(
+      users: Int,
+      products: Int,
+      features: Int,
+      iterations: Int,
+      samplingRate: Double,
+      matchThreshold: Double,
+      implicitPrefs: Boolean = false,
+      bulkPredict: Boolean = false,
+      negativeWeights: Boolean = false,
+      numUserBlocks: Int = -1,
+      numProductBlocks: Int = -1,
+      negativeFactors: Boolean = true) {
+    val (sampledRatings, trueRatings, truePrefs) = ALSSuite.generateRatings(users, products,
+      features, samplingRate, implicitPrefs, negativeWeights, negativeFactors)
+
+    val model = new ALS()
+      .setUserBlocks(numUserBlocks)
+      .setProductBlocks(numProductBlocks)
+      .setRank(features)
+      .setIterations(iterations)
+      .setAlpha(1.0)
+      .setImplicitPrefs(implicitPrefs)
+      .setLambda(0.01)
+      .setSeed(0L)
+      .setNonnegative(!negativeFactors)
+      .run(sc.parallelize(sampledRatings))
 
     val predictedU = new DoubleMatrix(users, features)
     for ((u, vec) <- model.userFeatures.collect(); i <- 0 until features) {
