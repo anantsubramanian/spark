@@ -97,7 +97,7 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*}*/
 
   test("rank-2 matrices") {
-    testALS(50, 100, 2, 15, 0.7, 0.3)
+    testALS(200, 100, 10, 10, 0.7, 0.3)
   }
 
   /*test("rank-2 matrices bulk") {*/
@@ -284,4 +284,3 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
     }
   }
 }
-
