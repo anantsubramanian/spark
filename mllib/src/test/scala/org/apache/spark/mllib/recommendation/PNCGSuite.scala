@@ -24,6 +24,8 @@ import scala.util.Random
 import org.scalatest.FunSuite
 import org.jblas.DoubleMatrix
 
+import org.apache.commons.math.random.MersenneTwister
+
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.storage.StorageLevel
 
@@ -49,7 +51,11 @@ object PNCGSuite {
       implicitPrefs: Boolean = false,
       negativeWeights: Boolean = false,
       negativeFactors: Boolean = true): (Seq[Rating], DoubleMatrix, DoubleMatrix) = {
-    val rand = new Random(42)
+
+    // use Mersenne Twister algorithm to compare with Octave
+    val rand = new MersenneTwister(0)
+
+    /*val rand = new Random(42)*/
 
     // Create a random matrix with uniform values from -1 to 1
     def randomMatrix(m: Int, n: Int) = {
