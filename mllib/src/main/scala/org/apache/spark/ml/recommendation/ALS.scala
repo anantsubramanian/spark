@@ -820,6 +820,30 @@ object ALS extends Logging {
       sumSquaredErr + usrNorm + itmNorm
     }
 
+    def grad(userFac: FactorRDD, itemFac: FactorRDD): (FactorRDD,FactorRDD) =
+    {
+      val userGrad: FactorRDD = evalGradient(
+        itemFac, 
+        userFac,
+        itemOutBlocks, 
+        userInBlocks, 
+        rank, 
+        regParam,
+        itemLocalIndexEncoder
+      )
+
+      val itemGrad: FactorRDD = evalGradient(
+        userFac,
+        itemFac, 
+        userOutBlocks, 
+        itemInBlocks, 
+        rank, 
+        regParam,
+        userLocalIndexEncoder
+      )
+      (userGrad,itemGrad)
+    }
+
     def computeAlpha(
         userFac: FactorRDD,
         itemFac: FactorRDD,
@@ -835,27 +859,8 @@ object ALS extends Logging {
         (rddAXPY(a,x._1,y._1),rddAXPY(a,x._2,y._2))
       }
 
-      def gradientProdDirec(): Float = 
-      {
-        val userGrad: FactorRDD = evalGradient(
-          itemFac, 
-          userFac,
-          itemOutBlocks, 
-          userInBlocks, 
-          rank, 
-          regParam,
-          itemLocalIndexEncoder
-        )
-
-        val itemGrad: FactorRDD = evalGradient(
-          userFac,
-          itemFac, 
-          userOutBlocks, 
-          itemInBlocks, 
-          rank, 
-          regParam,
-          userLocalIndexEncoder
-        )
+      def gradientProdDirec(): Float = {
+        val (userGrad,itemGrad) = grad(userFac,itemFac)
         rddDOT(userGrad,userDirec) + rddDOT(itemGrad,itemDirec)
       }
 
@@ -978,6 +983,32 @@ object ALS extends Logging {
       /*items.count()*/
       users = rddAXPY(alpha_pncg, direcUser, users).cache()
       items = rddAXPY(alpha_pncg, direcItem, items).cache()
+
+
+      if (sc.checkpointDir.isDefined && (iter % 5 == 0))
+      {
+        logStdout("Checkpointing at iter " + iter)
+        users.checkpoint()
+        items.checkpoint()
+        users_pc.checkpoint()
+        items_pc.checkpoint()
+        gradUser_old.checkpoint()
+        gradItem_old.checkpoint()
+        gradUser.checkpoint()
+        gradItem.checkpoint()
+        direcUser.checkpoint()
+        direcItem.checkpoint()
+        users.count
+        items.count
+        users_pc.count
+        items_pc.count
+        gradUser.count()
+        gradItem.count()
+        gradUser_old.count()
+        gradItem_old.count()
+        direcUser.count()
+        direcItem.count()
+      }
       /*users.count()*/
       /*items.count()*/
       /*logStdout("f_after_axpy=" + costFunc((users,items)))*/
@@ -999,10 +1030,17 @@ object ALS extends Logging {
       gradItem.count()
       /*logStdout("f after modifying grad{User,Item}=" + costFunc((users,items)))*/
 
+      val (gu,gi) = grad(users,items)
       // compute conjugate gradient beta parameter
-      gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
+      /*gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));*/
+      gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
+
+      val delta_g_users =rddAXPY(-1.0f,gradUser_old,gradUser);
+      val delta_g_items =rddAXPY(-1.0f,gradItem_old,gradItem);
       /*logStdout("f_after calc (gradTgrad=" + gradTgrad + ") =" + costFunc((users,items)))*/
-      beta_pncg = gradTgrad / gradTgrad_old
+      /*beta_pncg = gradTgrad / gradTgrad_old*/
+
+      beta_pncg = (gradTgrad - rddDOT(gu,gradUser_old) + rddDOT(gradItem,gradItem_old)) / gradTgrad_old
       /*logStdout("materliazizing beta=" + beta_pncg)*/
 
       /*logStdout("beta=" + beta_pncg)*/
@@ -1014,7 +1052,7 @@ object ALS extends Logging {
       direcUser.count()
       direcItem.count()
 
-      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": "+gradTgrad+": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem))+ ": " + costFunc((users,items))+ ": " + costFunc((users_pc,items_pc)))
+      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
 
       /*gradUser_old.unpersist()*/
       /*gradItem_old.unpersist()*/
@@ -1228,6 +1266,15 @@ object ALS extends Logging {
 
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
           itemLocalIndexEncoder, solver = solver)
+
+        if (sc.checkpointDir.isDefined && (iter % 10 == 0))
+        {
+          logStdout("Checkpointing at iter " + iter)
+          userFactors.checkpoint()
+          itemFactors.checkpoint()
+          userFactors.count
+          itemFactors.count
+        }
 
         val gu = evalGradient(
           itemFactors, 
