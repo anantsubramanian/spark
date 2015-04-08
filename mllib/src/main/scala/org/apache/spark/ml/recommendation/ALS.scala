@@ -951,12 +951,12 @@ object ALS extends Logging {
       gradItem_old.unpersist()
       gradUser_old = gradUser.cache()
       gradItem_old = gradItem.cache()
-      gradUser_old.count()
-      gradItem_old.count()
+      /*gradUser_old.count()*/
+      /*gradItem_old.count()*/
 
       //maeterialize everything
-      users.count()
-      items.count()
+      /*users.count()*/
+      /*items.count()*/
       /*direcUser.count()*/
       /*direcItem.count()*/
 
@@ -998,16 +998,16 @@ object ALS extends Logging {
         gradItem.checkpoint()
         direcUser.checkpoint()
         direcItem.checkpoint()
-        users.count
-        items.count
-        users_pc.count
-        items_pc.count
-        gradUser.count()
-        gradItem.count()
-        gradUser_old.count()
-        gradItem_old.count()
-        direcUser.count()
-        direcItem.count()
+        /*users.count*/
+        /*items.count*/
+        /*users_pc.count*/
+        /*items_pc.count*/
+        /*gradUser.count()*/
+        /*gradItem.count()*/
+        /*gradUser_old.count()*/
+        /*gradItem_old.count()*/
+        /*direcUser.count()*/
+        /*direcItem.count()*/
       }
       /*users.count()*/
       /*items.count()*/
@@ -1017,7 +1017,7 @@ object ALS extends Logging {
       // \bar{x} = P * \x_{k+1}
       users_pc = preconditionUsers(items).cache()
       items_pc = preconditionItems(users_pc).cache()
-      items_pc.count()
+      /*items_pc.count()*/
       /*logStdout("f_after_pc=" + costFunc((users,items)))*/
 
       // compute gradients
@@ -1026,8 +1026,8 @@ object ALS extends Logging {
       /*items.count()*/
       gradUser = rddAXPY(-1.0f,users_pc,users).cache() // x - x_pc
       gradItem = rddAXPY(-1.0f,items_pc,items).cache() // x - x_pc
-      gradUser.count()
-      gradItem.count()
+      /*gradUser.count()*/
+      /*gradItem.count()*/
       /*logStdout("f after modifying grad{User,Item}=" + costFunc((users,items)))*/
 
       val (gu,gi) = grad(users,items)
@@ -1049,10 +1049,11 @@ object ALS extends Logging {
       // p_{k+1} = -g + \beta * p_k
       direcUser = rddAXPBY(-1.0f,gradUser,beta_pncg,direcUser).cache()
       direcItem = rddAXPBY(-1.0f,gradItem,beta_pncg,direcItem).cache()
-      direcUser.count()
-      direcItem.count()
+      /*direcUser.count()*/
+      /*direcItem.count()*/
 
       logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
+      logStdout(users.toDebugString)
 
       /*gradUser_old.unpersist()*/
       /*gradItem_old.unpersist()*/
@@ -1274,6 +1275,7 @@ object ALS extends Logging {
           itemFactors.checkpoint()
           userFactors.count
           itemFactors.count
+          logStdout(userFactors.toDebugString)
         }
 
         val gu = evalGradient(
