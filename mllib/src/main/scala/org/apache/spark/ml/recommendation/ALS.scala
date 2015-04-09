@@ -524,10 +524,14 @@ object ALS extends Logging {
     var x: X = axpy(step,direc,x0)
     var f: Float = func(x)
     var k: Int = 1;
-    logStdout("---------------------------");
-    logStdout("linesearch: f0: " + f0);
-    logStdout("iter: alpha: f(x): [f-f0](x): c*m")
-    logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
+    val verbose: Boolean = false
+
+    if (verbose) {
+      logStdout("---------------------------");
+      logStdout("linesearch: f0: " + f0);
+      logStdout("iter: alpha: f(x): [f-f0](x): c*m")
+      logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
+    }
     while ( (f - f0 > step*dirProdGrad) && (k <= maxIters) )
     {
       // x = a*direc + x0
@@ -535,9 +539,10 @@ object ALS extends Logging {
       x = axpy(step,direc,x0)
       f = func(x)
       k += 1
-      logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
+      if (verbose){
+        logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
+      }
     }
-    /*logStdout("---------------------------");*/
     step
   }
     
@@ -950,10 +955,11 @@ object ALS extends Logging {
     /*gradItem.count()*/
 
 
-    logStdout("PNCG: iter: alpha: beta: <g,g>: <p,p>: f(u,m): f(u_pc,m_pc)")
-    logStdout("PNCG: 0: NaN: NaN: "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)) + ": " + costFunc(users,items) + ": " + costFunc(users_pc,items_pc))
+    logStdout("PNCG: iter: alpha: beta: |g|^2: f(u,m):")
+      logStdout("PNCG: "+ 0+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )
+    /*logStdout("PNCG: 0: NaN: NaN: "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)) + ": " + costFunc(users,items) + ": " + costFunc(users_pc,items_pc))*/
 
-    logStdout("PNCG: LINEAGE:" + users.toDebugString)
+    /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
     var iter: Int = 1
     for (iter <- 1 until maxIter) 
     {
@@ -1003,8 +1009,8 @@ object ALS extends Logging {
         items.checkpoint()
         items.count()
         users.count()
-        logStdout("PNCG: LINEAGE:" + users.toDebugString)
-        logStdout("PNCG: LINEAGE:" + items.toDebugString)
+        /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
+        /*logStdout("PNCG: LINEAGE:" + items.toDebugString)*/
       }
       /*users = rddAXPY(alpha_pncg, direcUser, users)*/
       /*items = rddAXPY(alpha_pncg, direcItem, items)*/
@@ -1022,8 +1028,8 @@ object ALS extends Logging {
         items_pc.checkpoint()
         items_pc.count()
         users_pc.count()
-        logStdout("PNCG: LINEAGE:" + users_pc.toDebugString)
-        logStdout("PNCG: LINEAGE:" + items_pc.toDebugString)
+        /*logStdout("PNCG: LINEAGE:" + users_pc.toDebugString)*/
+        /*logStdout("PNCG: LINEAGE:" + items_pc.toDebugString)*/
       }
 
       // compute the preconditioned gradient
@@ -1031,18 +1037,17 @@ object ALS extends Logging {
       gradUser = rddAXPY(-1.0f,users_pc,users).cache() // x - x_pc
       gradItem = rddAXPY(-1.0f,items_pc,items).cache() // x - x_pc
 
-      // compute the actual gradients
-      /*(gu,gi) = computeGradient(users,items)*/
 
       // compute beta 
 
       //FR
-      gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
-      beta_pncg = gradTgrad / gradTgrad_old
+      /*gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));*/
+      /*beta_pncg = gradTgrad / gradTgrad_old*/
 
       // PR
-      /*gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);*/
-      /*beta_pncg = (gradTgrad - (rddDOT(gu,gradUser_old) + rddDOT(gradItem,gradItem_old)) ) / gradTgrad_old*/
+      val (gu,gi) = computeGradient(users,items)
+      gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
+      beta_pncg = (gradTgrad - (rddDOT(gu,gradUser_old) + rddDOT(gradItem,gradItem_old)) ) / gradTgrad_old
 
       // p_{k+1} = -g + \beta * p_k
       direcUser = rddAXPBY(-1.0f,gradUser,beta_pncg,direcUser).cache()
@@ -1054,8 +1059,8 @@ object ALS extends Logging {
         direcItem.checkpoint()
         direcUser.count()
         direcItem.count()
-        logStdout("PNCG: LINEAGE:" + direcUser.toDebugString)
-        logStdout("PNCG: LINEAGE:" + direcItem.toDebugString)
+        /*logStdout("PNCG: LINEAGE:" + direcUser.toDebugString)*/
+        /*logStdout("PNCG: LINEAGE:" + direcItem.toDebugString)*/
       }
       /*direcUser.count()*/
       /*direcItem.count()*/
@@ -1271,7 +1276,27 @@ object ALS extends Logging {
     /*var n = evalTikhonovNorm(itemFactors, itemCounts, rank, regParam) + evalTikhonovNorm(userFactors, userCounts, rank, regParam)*/
     /*logStdout("lambda * sum ||m_i||^2 = " + n )*/
     /*var f = evalFrobeniusCost(itemFactors, userFactors, itemOutBlocks, userInBlocks, rank, regParam, itemLocalIndexEncoder)*/
-    logStdout("ALS: 0: "+ costFunc((userFactors,itemFactors)) +": NaN")
+
+    val gu = evalGradient(
+      itemFactors, 
+      userFactors,
+      itemOutBlocks, 
+      userInBlocks, 
+      rank, 
+      regParam,
+      itemLocalIndexEncoder
+    )
+    val gm = evalGradient(
+      userFactors,
+      itemFactors, 
+      userOutBlocks, 
+      itemInBlocks, 
+      rank, 
+      regParam,
+      userLocalIndexEncoder
+    )
+
+    logStdout("ALS:" + 0 +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
     /*logStdout("ALS: LINEAGE:" + userFactors.toDebugString)*/
     if (implicitPrefs) {
       for (iter <- 1 to maxIter) {
@@ -1325,7 +1350,7 @@ object ALS extends Logging {
           regParam,
           userLocalIndexEncoder
         )
-        logStdout("ALS:" + iter +": "+ costFunc((userFactors,itemFactors)) +": "+ rddNORMSQR(gu) + rddNORMSQR(gm))
+        logStdout("ALS:" + iter +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
         /*logStdout("ALS: LINEAGE:" + userFactors.toDebugString)*/
       }
     }
