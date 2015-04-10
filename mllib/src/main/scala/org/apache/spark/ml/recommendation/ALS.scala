@@ -929,10 +929,6 @@ object ALS extends Logging {
     var gradUser: FactorRDD = rddAXPY(-1.0f,users_pc,users).cache()
     var gradItem: FactorRDD = rddAXPY(-1.0f,items_pc,items).cache()
 
-    // make variable for the actual gradient ---bad naming, I know. Have to fix this
-    /*var gu: FactorRDD = gradUser*/
-    /*var gi: FactorRDD = gradItem*/
-
     // initialize variables for the previous iteration's gradients
     var gradUser_old: FactorRDD = gradUser.cache()
     var gradItem_old: FactorRDD = gradItem.cache()
@@ -940,67 +936,51 @@ object ALS extends Logging {
     // initial search direction to -gradient (steepest descent direction)
     var direcUser: FactorRDD = gradUser.mapValues{x => blockSCAL(x,-1.0f)}.cache()
     var direcItem: FactorRDD = gradItem.mapValues{x => blockSCAL(x,-1.0f)}.cache()
-    /*direcUser.count()*/
-    /*direcItem.count()*/
 
     // compute g^T * g
-    var gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));
+    // make variable for the actual gradient ---bad naming, I know. Have to fix this
+    val (gu,gi) = computeGradient(users,items)
+    var gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
     var gradTgrad_old = 0.0f;
 
+    val alpha_max: Float = 10.0f
     var beta_pncg: Float = gradTgrad
-    var alpha_pncg: Float = 1.0f
+    var alpha_pncg: Float = alpha_max
     val checkpointInterval: Int = 5 
-    //materialize rdds
-    /*gradUser.count()*/
-    /*gradItem.count()*/
 
 
     logStdout("PNCG: iter: alpha: beta: |g|^2: f(u,m):")
       logStdout("PNCG: "+ 0+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )
-    /*logStdout("PNCG: 0: NaN: NaN: "+gradTgrad +": " + (rddNORMSQR(direcUser)+rddNORMSQR(direcItem)) + ": " + costFunc(users,items) + ": " + costFunc(users_pc,items_pc))*/
 
-    /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
     var iter: Int = 1
     for (iter <- 1 until maxIter) 
     {
       // store old preconditioned gradient vectors for computing \beta
       gradTgrad_old = gradTgrad
-      /*gradUser_old.unpersist()*/
-      /*gradItem_old.unpersist()*/
-      /*gradUser_old = gradUser*/
-      /*gradItem_old = gradItem*/
       gradUser_old = gradUser.cache()
       gradItem_old = gradItem.cache()
-      /*gradUser_old.count()*/
-      /*gradItem_old.count()*/
-
-      /*users.count()*/
-      /*items.count()*/
-      /*direcUser.count()*/
-      /*direcItem.count()*/
 
       //compute alpha from linesearch()
-      /*logStdout("f_before_ls=" + costFunc((users,items)))*/
+      val alpha0 = {
+        if (alpha_pncg > 1e-3)
+          2*alpha_pncg
+        else
+          alpha_max
+      }
       alpha_pncg = computeAlpha(
         users,
         items,
         direcUser,
         direcItem,
-        2*alpha_pncg,
+        alpha0,
         0.5f,
         0.5f,
         10
       )
-      /*logStdout("f_after_ls=" + costFunc((users,items)))*/
-      /*logStdout("alpha = " + alpha_pncg)*/
-
 
       // x_{k+1} = x_k + \alpha * p_k
-      /*users.count()*/
-      /*items.count()*/
 
       users = rddAXPY(alpha_pncg, direcUser, users).cache()
-      /*users.checkpoint()*/
       items = rddAXPY(alpha_pncg, direcItem, items).cache()
 
       if (sc.checkpointDir.isDefined && (iter % checkpointInterval == 0))
@@ -1012,12 +992,6 @@ object ALS extends Logging {
         /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
         /*logStdout("PNCG: LINEAGE:" + items.toDebugString)*/
       }
-      /*users = rddAXPY(alpha_pncg, direcUser, users)*/
-      /*items = rddAXPY(alpha_pncg, direcItem, items)*/
-
-      /*gu = computeUserGradient(users,items);*/
-      /*gi = computeItemGradient(users,items);*/
-
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
       users_pc = preconditionUsers(items).cache()
@@ -1037,9 +1011,7 @@ object ALS extends Logging {
       gradUser = rddAXPY(-1.0f,users_pc,users).cache() // x - x_pc
       gradItem = rddAXPY(-1.0f,items_pc,items).cache() // x - x_pc
 
-
       // compute beta 
-
       //FR
       /*gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));*/
       /*beta_pncg = gradTgrad / gradTgrad_old*/
@@ -1062,34 +1034,12 @@ object ALS extends Logging {
         /*logStdout("PNCG: LINEAGE:" + direcUser.toDebugString)*/
         /*logStdout("PNCG: LINEAGE:" + direcItem.toDebugString)*/
       }
-      /*direcUser.count()*/
-      /*direcItem.count()*/
 
-      /*if (sc.checkpointDir.isDefined && (iter % checkpointInterval  == 0))*/
-      /*{*/
-        /*logStdout("Checkpointing at iter " + iter)*/
-        /*users.checkpoint()*/
-        /*items.checkpoint()*/
-        /*users_pc.checkpoint()*/
-        /*items_pc.checkpoint()*/
-        /*gradUser_old.checkpoint()*/
-        /*gradItem_old.checkpoint()*/
-        /*gradUser.checkpoint()*/
-        /*gradItem.checkpoint()*/
-        /*direcUser.checkpoint()*/
-        /*direcItem.checkpoint()*/
-        /*gu.checkpoint()*/
-        /*gi.checkpoint()*/
+      /*logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )*/
 
-        /*users.count()*/
-        /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
-      /*}*/
-
-      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )
-
-      /*logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )*/
-      /*gradUser_old.unpersist()*/
-      /*gradItem_old.unpersist()*/
+      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
+      gradUser_old.unpersist()
+      gradItem_old.unpersist()
     }
 
     val userIdAndFactors = userInBlocks
@@ -1454,9 +1404,13 @@ object ALS extends Logging {
     inBlocks.map { case (srcBlockId, inBlock) =>
       val random = new XORShiftRandom(byteswap64(seed ^ srcBlockId))
       val factors = Array.fill(inBlock.srcIds.length) {
-        val factor = Array.fill(rank)(random.nextGaussian().toFloat)
-        val nrm = blas.snrm2(rank, factor, 1)
-        blas.sscal(rank, 1.0f / nrm, factor, 1)
+
+        // setting this to be all ones, just for now. ---REPLACE THIS
+        val factor = Array.fill(rank)(1.0f)
+
+        /*val factor = Array.fill(rank)(random.nextGaussian().toFloat)*/
+        /*val nrm = blas.snrm2(rank, factor, 1)*/
+        /*blas.sscal(rank, 1.0f / nrm, factor, 1)*/
         factor
       }
       (srcBlockId, factors)
