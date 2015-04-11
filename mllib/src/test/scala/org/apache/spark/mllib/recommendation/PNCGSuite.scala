@@ -103,10 +103,13 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
   /*}*/
 
   test("rank-2 matrices") {
+    val n = 500;
+    val m = 100;
     val numIter = 100;
+    val rank = 10;
     sc.setCheckpointDir("/home/mike/swork/")
-    testALSorig(1000, 200, 30, numIter, 0.7, 5000000)
-    testALS(1000, 200, 30, numIter, 0.7, 50000000)
+    testALSorig(n, m, rank, numIter, 0.7, 5000000)
+    testALS(n, m, rank, numIter, 0.7, 50000000)
   }
 
   /*test("rank-2 matrices bulk") {*/

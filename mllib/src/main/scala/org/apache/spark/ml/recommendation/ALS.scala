@@ -946,7 +946,7 @@ object ALS extends Logging {
     val alpha_max: Float = 10.0f
     var beta_pncg: Float = gradTgrad
     var alpha_pncg: Float = alpha_max
-    val checkpointInterval: Int = 5 
+    val checkpointInterval: Int = 10 
 
 
     logStdout("PNCG: iter: alpha: beta: |g|^2: f(u,m):")
@@ -989,8 +989,9 @@ object ALS extends Logging {
         items.checkpoint()
         items.count()
         users.count()
-        /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
-        /*logStdout("PNCG: LINEAGE:" + items.toDebugString)*/
+        logStdout("PNCG: checkpointing at: " +iter+ " iterations" )
+        logStdout("PNCG: LINEAGE:" + users.toDebugString)
+        logStdout("PNCG: LINEAGE:" + items.toDebugString)
       }
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
@@ -1406,11 +1407,11 @@ object ALS extends Logging {
       val factors = Array.fill(inBlock.srcIds.length) {
 
         // setting this to be all ones, just for now. ---REPLACE THIS
-        val factor = Array.fill(rank)(1.0f)
+        /*val factor = Array.fill(rank)(1.0f)*/
 
-        /*val factor = Array.fill(rank)(random.nextGaussian().toFloat)*/
-        /*val nrm = blas.snrm2(rank, factor, 1)*/
-        /*blas.sscal(rank, 1.0f / nrm, factor, 1)*/
+        val factor = Array.fill(rank)(random.nextGaussian().toFloat)
+        val nrm = blas.snrm2(rank, factor, 1)
+        blas.sscal(rank, 1.0f / nrm, factor, 1)
         factor
       }
       (srcBlockId, factors)

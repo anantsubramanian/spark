@@ -317,17 +317,10 @@ object ALS {
       rank: Int,
       iterations: Int,
       lambda: Double,
-      blocks: Int): MatrixFactorizationModel = 
+      userBlocks: Int,
+      itemBlocks: Int): MatrixFactorizationModel = 
   {
-    new ALS(
-      blocks, 
-      blocks, 
-      rank, 
-      iterations, 
-      lambda, 
-      false, 
-      1.0)
-      .runPNCG(ratings)
+    new ALS(userBlocks, itemBlocks, rank, iterations, lambda, false, 1.0).runPNCG(ratings)
   }
 
   /**
