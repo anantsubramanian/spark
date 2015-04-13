@@ -1020,7 +1020,15 @@ object ALS extends Logging {
       // PR
       val (gu,gi) = computeGradient(users,items)
       gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
-      beta_pncg = (gradTgrad - (rddDOT(gu,gradUser_old) + rddDOT(gradItem,gradItem_old)) ) / gradTgrad_old
+      beta_pncg = {
+        if (gradTgrad > 0)
+          (gradTgrad - (rddDOT(gu,gradUser_old) + rddDOT(gradItem,gradItem_old)) ) / gradTgrad_old
+        else
+        {
+          logStdout("Restartign in steepest descent; beta = 0")
+          0f
+        }
+      }
 
       // p_{k+1} = -g + \beta * p_k
       direcUser = rddAXPBY(-1.0f,gradUser,beta_pncg,direcUser).cache()
