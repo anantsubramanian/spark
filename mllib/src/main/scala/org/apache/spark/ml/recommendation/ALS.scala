@@ -993,6 +993,9 @@ object ALS extends Logging {
         logStdout("PNCG: LINEAGE:" + users.toDebugString)
         logStdout("PNCG: LINEAGE:" + items.toDebugString)
       }
+      logStdout("users has " + users.partitions.length + "partitions")
+      logStdout("items has " + users.partitions.length + "partitions")
+
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
       users_pc = preconditionUsers(items).cache()
@@ -1006,6 +1009,8 @@ object ALS extends Logging {
         /*logStdout("PNCG: LINEAGE:" + users_pc.toDebugString)*/
         /*logStdout("PNCG: LINEAGE:" + items_pc.toDebugString)*/
       }
+      logStdout("users_pc has " + users_pc.partitions.length + "partitions")
+      logStdout("items_pc has " + users_pc.partitions.length + "partitions")
 
       // compute the preconditioned gradient
       // g = x_{k+1} - \bar{x} 
@@ -1220,8 +1225,6 @@ object ALS extends Logging {
       )
       sumSquaredErr + usrNorm + itmNorm
     }
-
-
 
     logStdout("ALS: f(u,m): ||g||^2")
     /*var n = evalTikhonovNorm(itemFactors, itemCounts, rank, regParam) + evalTikhonovNorm(userFactors, userCounts, rank, regParam)*/
