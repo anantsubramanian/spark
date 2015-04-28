@@ -543,6 +543,7 @@ object ALS extends Logging {
         logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
       }
     }
+    logStdout("linesearch: " + k)
     step
   }
     
@@ -953,7 +954,7 @@ object ALS extends Logging {
       logStdout("PNCG: "+ 0+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )
 
     var iter: Int = 1
-    for (iter <- 1 until maxIter) 
+    for (iter <- 1 until maxIter+1) 
     {
       // store old preconditioned gradient vectors for computing \beta
       gradTgrad_old = gradTgrad
@@ -993,8 +994,6 @@ object ALS extends Logging {
         logStdout("PNCG: LINEAGE:" + users.toDebugString)
         logStdout("PNCG: LINEAGE:" + items.toDebugString)
       }
-      logStdout("users has " + users.partitions.length + "partitions")
-      logStdout("items has " + users.partitions.length + "partitions")
 
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
@@ -1009,8 +1008,6 @@ object ALS extends Logging {
         /*logStdout("PNCG: LINEAGE:" + users_pc.toDebugString)*/
         /*logStdout("PNCG: LINEAGE:" + items_pc.toDebugString)*/
       }
-      logStdout("users_pc has " + users_pc.partitions.length + "partitions")
-      logStdout("items_pc has " + users_pc.partitions.length + "partitions")
 
       // compute the preconditioned gradient
       // g = x_{k+1} - \bar{x} 
@@ -1253,7 +1250,7 @@ object ALS extends Logging {
     logStdout("ALS:" + 0 +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
     /*logStdout("ALS: LINEAGE:" + userFactors.toDebugString)*/
     if (implicitPrefs) {
-      for (iter <- 1 to maxIter) {
+      for (iter <- 1 to maxIter+1) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
         val previousItemFactors = itemFactors
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
