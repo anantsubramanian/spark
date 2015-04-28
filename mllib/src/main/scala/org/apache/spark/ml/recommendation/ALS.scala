@@ -1021,11 +1021,11 @@ object ALS extends Logging {
       val (gu,gi) = computeGradient(users,items)
       gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
       beta_pncg = {
-        if (gradTgrad > 0)
+        if (gradTgrad_old > 0.0f)
           (gradTgrad - (rddDOT(gu,gradUser_old) + rddDOT(gradItem,gradItem_old)) ) / gradTgrad_old
         else
         {
-          logStdout("Restartign in steepest descent; beta = 0")
+          logStdout("PNCG: Restarting in steepest descent direction; beta = 0")
           0f
         }
       }
