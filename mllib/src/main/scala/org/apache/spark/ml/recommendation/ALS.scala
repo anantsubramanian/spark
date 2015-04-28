@@ -543,6 +543,7 @@ object ALS extends Logging {
         logStdout(k + ": " + step + ": " + f + ": " + (f-f0) + ": " + step*dirProdGrad)
       }
     }
+    logStdout("linesearch: " + k)
     step
   }
     
@@ -953,7 +954,7 @@ object ALS extends Logging {
       logStdout("PNCG: "+ 0+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )
 
     var iter: Int = 1
-    for (iter <- 1 until maxIter) 
+    for (iter <- 1 until maxIter+1) 
     {
       // store old preconditioned gradient vectors for computing \beta
       gradTgrad_old = gradTgrad
@@ -993,6 +994,7 @@ object ALS extends Logging {
         logStdout("PNCG: LINEAGE:" + users.toDebugString)
         logStdout("PNCG: LINEAGE:" + items.toDebugString)
       }
+
       // precondition x with ALS
       // \bar{x} = P * \x_{k+1}
       users_pc = preconditionUsers(items).cache()
@@ -1229,8 +1231,6 @@ object ALS extends Logging {
       sumSquaredErr + usrNorm + itmNorm
     }
 
-
-
     logStdout("ALS: f(u,m): ||g||^2")
     /*var n = evalTikhonovNorm(itemFactors, itemCounts, rank, regParam) + evalTikhonovNorm(userFactors, userCounts, rank, regParam)*/
     /*logStdout("lambda * sum ||m_i||^2 = " + n )*/
@@ -1258,7 +1258,7 @@ object ALS extends Logging {
     logStdout("ALS:" + 0 +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
     /*logStdout("ALS: LINEAGE:" + userFactors.toDebugString)*/
     if (implicitPrefs) {
-      for (iter <- 1 to maxIter) {
+      for (iter <- 1 to maxIter+1) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
         val previousItemFactors = itemFactors
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
