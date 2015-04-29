@@ -335,7 +335,7 @@ object ALS extends Logging {
     def solve(ne: NormalEquation, lambda: Double): Array[Float]
   }
   private def logStdout(msg: String): Unit = {
-		val time: Long = System.currentTimeMillis/1000;
+		val time: Long = System.currentTimeMillis;
 		logInfo(msg);
 		println(time + ": " + msg);
 	}
@@ -947,11 +947,14 @@ object ALS extends Logging {
     val alpha_max: Float = 10.0f
     var beta_pncg: Float = gradTgrad
     var alpha_pncg: Float = alpha_max
-    val checkpointInterval: Int = 10 
+    val checkpointInterval: Int = 15 
 
 
     logStdout("PNCG: iter: alpha: beta: |g|^2: f(u,m):")
-      logStdout("PNCG: "+ 0+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )
+      /*logStdout("PNCG: "+ 0+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )*/
+
+    // materialize all RDDs
+    logStdout("PNCG: "+ 0+ ":" + gradTgrad )
 
     var iter: Int = 1
     for (iter <- 1 until maxIter+1) 
@@ -991,8 +994,8 @@ object ALS extends Logging {
         items.count()
         users.count()
         logStdout("PNCG: checkpointing at: " +iter+ " iterations" )
-        logStdout("PNCG: LINEAGE:" + users.toDebugString)
-        logStdout("PNCG: LINEAGE:" + items.toDebugString)
+        /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
+        /*logStdout("PNCG: LINEAGE:" + items.toDebugString)*/
       }
 
       // precondition x with ALS
@@ -1048,9 +1051,14 @@ object ALS extends Logging {
 
       /*logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(computeItemGradient(users,items))+rddNORMSQR(computeUserGradient(users,items)))+ ": " + costFunc((users,items)) )*/
 
-      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
+      /*logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )*/
+
+      //materialize RDDs
+      logStdout("PNCG: "+ iter+ ":" + (direcUser.count + direcItem.count ) )
       gradUser_old.unpersist()
       gradItem_old.unpersist()
+      gu.unpersist()
+      gi.unpersist()
     }
 
     val userIdAndFactors = userInBlocks
@@ -1255,8 +1263,8 @@ object ALS extends Logging {
       userLocalIndexEncoder
     )
 
-    logStdout("ALS:" + 0 +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
-    /*logStdout("ALS: LINEAGE:" + userFactors.toDebugString)*/
+    /*logStdout("ALS:" + 0 +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )*/
+    logStdout("ALS:" + 0 +": "+ (userFactors.count + itemFactors.count) )
     if (implicitPrefs) {
       for (iter <- 1 to maxIter+1) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1264,7 +1272,7 @@ object ALS extends Logging {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
           userLocalIndexEncoder, implicitPrefs, alpha, solver)
         previousItemFactors.unpersist()
-        if (sc.checkpointDir.isDefined && (iter % 10 == 0)) {
+        if (sc.checkpointDir.isDefined && (iter % 15 == 0)) {
           itemFactors.checkpoint()
         }
         itemFactors.setName(s"itemFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1274,14 +1282,14 @@ object ALS extends Logging {
         previousUserFactors.unpersist()
       }
     } else {
-      for (iter <- 1 until maxIter) {
+      for (iter <- 1 until maxIter+1) {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
           userLocalIndexEncoder, solver = solver)
 
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
           itemLocalIndexEncoder, solver = solver)
 
-        if (sc.checkpointDir.isDefined && (iter % 10 == 0))
+        if (sc.checkpointDir.isDefined && (iter % 15 == 0))
         {
           logStdout("Checkpointing at iter " + iter)
           userFactors.checkpoint()
@@ -1291,25 +1299,26 @@ object ALS extends Logging {
           logStdout("ALS: LINEAGE:" + userFactors.toDebugString)
         }
 
-        val gu = evalGradient(
-          itemFactors, 
-          userFactors,
-          itemOutBlocks, 
-          userInBlocks, 
-          rank, 
-          regParam,
-          itemLocalIndexEncoder
-        )
-        val gm = evalGradient(
-          userFactors,
-          itemFactors, 
-          userOutBlocks, 
-          itemInBlocks, 
-          rank, 
-          regParam,
-          userLocalIndexEncoder
-        )
-        logStdout("ALS:" + iter +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
+        logStdout("ALS:" + iter +": "+ (userFactors.count + itemFactors.count) )
+        /*val gu = evalGradient(*/
+        /*  itemFactors, */
+        /*  userFactors,*/
+        /*  itemOutBlocks, */
+        /*  userInBlocks, */
+        /*  rank, */
+        /*  regParam,*/
+        /*  itemLocalIndexEncoder*/
+        /*)*/
+        /*val gm = evalGradient(*/
+        /*  userFactors,*/
+        /*  itemFactors, */
+        /*  userOutBlocks, */
+        /*  itemInBlocks, */
+        /*  rank, */
+        /*  regParam,*/
+        /*  userLocalIndexEncoder*/
+        /*)*/
+        /*logStdout("ALS:" + iter +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )*/
         /*logStdout("ALS: LINEAGE:" + userFactors.toDebugString)*/
       }
     }
