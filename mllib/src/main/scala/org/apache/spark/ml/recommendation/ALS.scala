@@ -520,7 +520,7 @@ object ALS extends Logging {
       ): Float = 
   {
     val f0: Float = func(x0)
-    logStdout("linesearch: var: f0: " + f0);
+    logStdout("linesearch: var: f: " + f0);
 
     var step: Float = initStep
     var x: X = axpy(step)
@@ -795,6 +795,7 @@ object ALS extends Logging {
     type FacTup = (FactorRDD,FactorRDD) // (user,items)
     def costFunc(x: FacTup): Float =
     {
+      logStdout("costFunc: _init_");
       val usr = x._1
       val itm = x._2
       val sumSquaredErr: Float = evalFrobeniusCost(
@@ -806,18 +807,21 @@ object ALS extends Logging {
         regParam,
         itemLocalIndexEncoder
       )  
+      /*logStdout("costFunc: frobenius:" + sumSquaredErr);*/
       val usrNorm: Float = evalTikhonovNorm(
         usr, 
         userCounts,
         rank,
         regParam
       ) 
+      /*logStdout("costFunc: userReg:" + usrNorm);*/
       val itmNorm: Float = evalTikhonovNorm(
         itm, 
         itemCounts,
         rank,
         regParam
       )
+      /*logStdout("costFunc: itemReg:" + itmNorm);*/
       sumSquaredErr + usrNorm + itmNorm
     }
 
@@ -875,10 +879,14 @@ object ALS extends Logging {
         (u,i)
       }
 
-      def gradientProdDirec(): Float = {
-        val (userGrad,itemGrad) = computeGradient(userFac,itemFac)
-        rddDOT(userGrad,userDirec) + rddDOT(itemGrad,itemDirec)
-      }
+      logStdout("linesearch: _init_ ");
+      val (userGrad,itemGrad) = computeGradient(userFac,itemFac)
+      logStdout("linesearch: var: gu: " + userGrad.count);
+      logStdout("linesearch: var: gi: " + itemGrad.count);
+      val gradientProdDirec: Float = rddDOT(userGrad,userDirec) + rddDOT(itemGrad,itemDirec)
+      logStdout("linesearch: var: gTp: " + gradientProdDirec);
+      userGrad.unpersist()
+      itemGrad.unpersist()
 
       val alpha = linesearch(
         costFunc,
@@ -887,7 +895,7 @@ object ALS extends Logging {
         (userDirec,itemDirec),
         reduceFrac,
         initStep,
-        gradFrac * gradientProdDirec(),
+        gradFrac * gradientProdDirec,
         maxIters
       )
       userRay.unpersist()
@@ -909,38 +917,46 @@ object ALS extends Logging {
     val seedGen = new XORShiftRandom(seed)
     var users: FactorRDD = initialize(userInBlocks, rank, seedGen.nextLong())
     var items: FactorRDD = initialize(itemInBlocks, rank, seedGen.nextLong())
+    logStdout("PNCG: var: users_init: " + users.count)
+    logStdout("PNCG: var: items_init: " + items.count)
+    logStdout("PNCG: " + 0)
 
     var users_pc: FactorRDD = preconditionUsers(items).cache()
+    logStdout("PNCG: var: users_pc: " + users_pc.count)
     var items_pc: FactorRDD = preconditionItems(users_pc).cache()
+    logStdout("PNCG: var: items_pc: " + items_pc.count)
 
     // compute preconditioned gradients; g = x - x_pc
     var gradUser: FactorRDD = rddAXPY(-1.0f,users_pc,users).cache()
     var gradItem: FactorRDD = rddAXPY(-1.0f,items_pc,items).cache()
+    logStdout("PNCG: var: gradUser: " + gradUser.count)
+    logStdout("PNCG: var: gradItem: " + gradItem.count)
 
     // initialize variables for the previous iteration's gradients
-    var gradUser_old: FactorRDD = gradUser.cache()
-    var gradItem_old: FactorRDD = gradItem.cache()
+    var gradUser_old: FactorRDD = gradUser
+    var gradItem_old: FactorRDD = gradItem
+    logStdout("PNCG: var: gradUser_old: " + gradUser_old.count)
+    logStdout("PNCG: var: gradItem_old: " + gradItem_old.count)
 
     // initial search direction to -gradient (steepest descent direction)
     var direcUser: FactorRDD = gradUser.mapValues{x => blockSCAL(x,-1.0f)}.cache()
     var direcItem: FactorRDD = gradItem.mapValues{x => blockSCAL(x,-1.0f)}.cache()
+    logStdout("PNCG: var: direcUser: " + direcUser.count)
+    logStdout("PNCG: var: direcItem: " + direcItem.count)
 
     // compute g^T * g
     // make variable for the actual gradient ---bad naming, I know. Have to fix this
     val (gu,gi) = computeGradient(users,items)
+    logStdout("PNCG: var: gu: " + gu.count)
+    logStdout("PNCG: var: gi: " + gi.count)
     var gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
+    logStdout("PNCG: var: gradTgrad: " + gradTgrad)
     var gradTgrad_old = 0.0f;
 
     val alpha_max: Float = 10.0f
     var beta_pncg: Float = gradTgrad
     var alpha_pncg: Float = alpha_max
     val checkpointInterval: Int = 15 
-
-
-    logStdout("PNCG: iter: alpha: beta: |g|^2: f(u,m):")
-
-    // materialize all RDDs
-    logStdout("PNCG: "+ 0+ ":" + gradTgrad )
 
     var iter: Int = 1
     for (iter <- 1 until maxIter+1) 
@@ -957,7 +973,7 @@ object ALS extends Logging {
         else
           alpha_max
       }
-      logStdout("PNCG: var: alpha0: " + alpha0)
+      logStdout("PNCG: linesearch: alpha0: " + alpha0)
       alpha_pncg = computeAlpha(
         users,
         items,
@@ -968,7 +984,7 @@ object ALS extends Logging {
         0.5f,
         10
       )
-      logStdout("PNCG: var: alpha: " + alpha)
+      logStdout("PNCG: var: alpha_pncg: " + alpha)
 
       // x_{k+1} = x_k + \alpha * p_k
 
@@ -982,8 +998,6 @@ object ALS extends Logging {
         items.count()
         users.count()
         logStdout("PNCG: checkpointing at: " +iter+ " iterations" )
-        /*logStdout("PNCG: LINEAGE:" + users.toDebugString)*/
-        /*logStdout("PNCG: LINEAGE:" + items.toDebugString)*/
       }
       logStdout("PNCG: var: users_axpy: " + users.count)
       logStdout("PNCG: var: items_axpy: " + items.count)
@@ -1003,6 +1017,7 @@ object ALS extends Logging {
       logStdout("PNCG: var: gradItem: " + gradItem.count)
 
       // compute beta 
+      //======================================================
       //FR
       /*gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));*/
       /*beta_pncg = gradTgrad / gradTgrad_old*/
@@ -1044,11 +1059,12 @@ object ALS extends Logging {
       /*logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )*/
 
       //materialize RDDs
-      logStdout("PNCG: "+ iter+ ":" + (direcUser.count + direcItem.count ) )
+      /*logStdout("PNCG: "+ iter+ ":" + (direcUser.count + direcItem.count ) )*/
       gradUser_old.unpersist()
       gradItem_old.unpersist()
       gu.unpersist()
       gi.unpersist()
+      logStdout("PNCG: " + iter)
     }
 
     val userIdAndFactors = userInBlocks
@@ -1157,12 +1173,13 @@ object ALS extends Logging {
           logStdout("Checkpointing at iter " + iter)
           itemFactors.checkpoint()
         }
-        /*logStdout("ALS: " + iter + ":item: " + itemFactors.count) */
+        logStdout("ALS: var: itemFactors: " + itemFactors.count) 
 
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
           itemLocalIndexEncoder, solver = solver)
 
-        logStdout("ALS: " + iter + ":user: " + itemFactors.count) 
+        logStdout("ALS: var: userFactors: " + userFactors.count) 
+        logStdout("ALS: " + iter + ":" + userFactors.count) 
       }
     }
     val userIdAndFactors = userInBlocks
