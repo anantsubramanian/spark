@@ -519,6 +519,7 @@ object ALS extends Logging {
       maxIters: Int = 10
       ): Float = 
   {
+    logStdout("linesearch: _init_ ");
     val f0: Float = func(x0)
     logStdout("linesearch: var: f: " + f0);
 
@@ -878,8 +879,9 @@ object ALS extends Logging {
         logStdout("linesearch: var: item_axpy: " + i.count)
         (u,i)
       }
+      logStdout("computeAlpha: var: userRay:" + userRay.count)
+      logStdout("computeAlpha: var: itemRay:" + itemRay.count)
 
-      logStdout("linesearch: _init_ ");
       val (userGrad,itemGrad) = computeGradient(userFac,itemFac)
       logStdout("linesearch: var: gu: " + userGrad.count);
       logStdout("linesearch: var: gi: " + itemGrad.count);
@@ -915,11 +917,11 @@ object ALS extends Logging {
 
     // generate initial factor vectors
     val seedGen = new XORShiftRandom(seed)
-    var users: FactorRDD = initialize(userInBlocks, rank, seedGen.nextLong())
-    var items: FactorRDD = initialize(itemInBlocks, rank, seedGen.nextLong())
+    var users: FactorRDD = initialize(userInBlocks, rank, seedGen.nextLong()).cache()
+    var items: FactorRDD = initialize(itemInBlocks, rank, seedGen.nextLong()).cache()
     logStdout("PNCG: var: users_init: " + users.count)
     logStdout("PNCG: var: items_init: " + items.count)
-    logStdout("PNCG: " + 0)
+    logStdout("PNCG: " + 0 + ":")
 
     var users_pc: FactorRDD = preconditionUsers(items).cache()
     logStdout("PNCG: var: users_pc: " + users_pc.count)
@@ -933,8 +935,8 @@ object ALS extends Logging {
     logStdout("PNCG: var: gradItem: " + gradItem.count)
 
     // initialize variables for the previous iteration's gradients
-    var gradUser_old: FactorRDD = gradUser
-    var gradItem_old: FactorRDD = gradItem
+    var gradUser_old: FactorRDD = gradUser.cache()
+    var gradItem_old: FactorRDD = gradItem.cache()
     logStdout("PNCG: var: gradUser_old: " + gradUser_old.count)
     logStdout("PNCG: var: gradItem_old: " + gradItem_old.count)
 
@@ -1064,7 +1066,7 @@ object ALS extends Logging {
       gradItem_old.unpersist()
       gu.unpersist()
       gi.unpersist()
-      logStdout("PNCG: " + iter)
+      logStdout("PNCG: " + iter + ":")
     }
 
     val userIdAndFactors = userInBlocks
