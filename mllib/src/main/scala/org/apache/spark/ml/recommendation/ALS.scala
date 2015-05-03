@@ -1146,8 +1146,8 @@ object ALS extends Logging {
     itemCounts.count()
     itemOutBlocks.count()
     val seedGen = new XORShiftRandom(seed)
-    var userFactors = initialize(userInBlocks, rank, seedGen.nextLong())
-    var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong())
+    var userFactors = initialize(userInBlocks, rank, seedGen.nextLong()).cache()
+    var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong()).cache()
 
     logStdout("ALS:" + 0 +": "+ (userFactors.count + itemFactors.count) )
     if (implicitPrefs) {
@@ -1169,7 +1169,7 @@ object ALS extends Logging {
     } else {
       for (iter <- 1 until maxIter+1) {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
-          userLocalIndexEncoder, solver = solver)
+          userLocalIndexEncoder, solver = solver).cache()
         if (sc.checkpointDir.isDefined && (iter % 15 == 0))
         {
           logStdout("Checkpointing at iter " + iter)
@@ -1178,10 +1178,10 @@ object ALS extends Logging {
         logStdout("ALS: var: itemFactors: " + itemFactors.count) 
 
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
-          itemLocalIndexEncoder, solver = solver)
+          itemLocalIndexEncoder, solver = solver).cache()
 
         logStdout("ALS: var: userFactors: " + userFactors.count) 
-        logStdout("ALS: " + iter + ":" + userFactors.count) 
+        logStdout("ALS: " + iter + ":" + iter) 
       }
     }
     val userIdAndFactors = userInBlocks
