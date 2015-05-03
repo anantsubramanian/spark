@@ -903,6 +903,7 @@ object ALS extends Logging {
     val seedGen = new XORShiftRandom(seed)
     var users: FactorRDD = initialize(userInBlocks, rank, seedGen.nextLong()).cache()
     var items: FactorRDD = initialize(itemInBlocks, rank, seedGen.nextLong()).cache()
+    logStdout("PNCG: -1:" + (users.count + items.count));
 
     var users_pc: FactorRDD = preconditionUsers(items).cache()
     var items_pc: FactorRDD = preconditionItems(users_pc).cache()

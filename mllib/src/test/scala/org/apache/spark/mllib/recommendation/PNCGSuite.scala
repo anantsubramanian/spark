@@ -108,7 +108,7 @@ class PNCGSuite extends FunSuite with MLlibTestSparkContext {
     val numIter = 2;
     val rank = 30;
     sc.setCheckpointDir("/tmp")
-    /*testALSorig(n, m, rank, numIter, 0.7, 5000000)*/
+    testALSorig(n, m, rank, numIter, 0.7, 5000000)
     testALS(n, m, rank, numIter, 0.7, 50000000)
   }
 
