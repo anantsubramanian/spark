@@ -849,7 +849,9 @@ object ALS extends Logging {
         initStep: Float,
         reduceFrac: Float,
         gradFrac: Float,
-        maxIters: Int): Float = 
+        maxIters: Int,
+        srcEncoder: LocalIndexEncoder
+        ): Float = 
     {
       /*def axpy(a: Float, x: FacTup, y: FacTup): FacTup = {*/
       /*  (rddAXPY(a,x._1,y._1),rddAXPY(a,x._2,y._2))*/
@@ -863,30 +865,117 @@ object ALS extends Logging {
       def newUser(a: Float): FactorRDD = userRay.mapValues{ x => newPoint(a,x) }
       def newItem(a: Float): FactorRDD = itemRay.mapValues{ x => newPoint(a,x) }
 
-      def axpy(a: Float): FacTup = {
-        val u = newUser(a);
-        val i = newItem(a);
-        (u,i)
-      }
-
       val (userGrad,itemGrad) = computeGradient(userFac,itemFac)
       val gradientProdDirec: Float = rddDOT(userGrad,userDirec) + rddDOT(itemGrad,itemDirec)
+      logStdout("linesearch: var: gradientProdDirec: " + gradientProdDirec)
       userGrad.unpersist()
       itemGrad.unpersist()
 
-      val alpha = linesearch(
-        costFunc,
-        axpy,
-        (userFac,itemFac),
-        (userDirec,itemDirec),
-        reduceFrac,
-        initStep,
-        gradFrac * gradientProdDirec,
-        maxIters
-      )
+      val useNewCost = true
+      val alpha = if (useNewCost) 
+      {
+        type Ray = (FactorBlock,FactorBlock)
+        type RaysToSend = Iterable[(Int,Ray)]
+
+        val joinedRays: RDD[( (InBlock[ID], (Array[FactorBlock],Array[FactorBlock])),Ray)] = 
+          makeFrobeniusCostRDD(
+            itemFac, 
+            itemDirec,
+            userFac, 
+            userDirec,
+            itemOutBlocks, 
+            userInBlocks, 
+            rank
+          ).cache()  
+
+        def computeSquaredError(
+            block: InBlock[ID], 
+            /*factorList: Iterable[(Int,FactorBlock)],*/
+            sortedRays: (Array[FactorBlock],Array[FactorBlock]),
+            current: Ray,
+            alpha: Float): Float = 
+        {
+          val currentFactors = current._1
+          val currentFactorDirecs = current._2
+          val sortedSrcFactors = sortedRays._1
+          val sortedSrcFactorDirecs = sortedRays._2
+          val len = block.srcIds.length
+          var j = 0
+          var sumErrs: Double = 0
+          while (j < len) 
+          {
+            var i = block.dstPtrs(j)
+            while (i < block.dstPtrs(j + 1)) {
+              val encoded = block.dstEncodedIndices(i)
+              val blockId = srcEncoder.blockId(encoded)
+              val localIndex = srcEncoder.localIndex(encoded)
+              val srcFactor = sortedSrcFactors(blockId)(localIndex)
+              val srcDirec = sortedSrcFactorDirecs(blockId)(localIndex)
+
+              val x = srcFactor.clone()
+              blas.saxpy(rank,alpha,srcDirec,1,x,1)
+
+              val x_cur = currentFactors(j).clone()
+              blas.saxpy(rank,alpha,currentFactorDirecs(j),1,x_cur,1)
+
+              val rating = block.ratings(i)
+              val diff = blas.sdot(rank,x,1,x_cur,1) - rating
+              sumErrs += diff * diff
+              i += 1
+            }
+            j += 1
+          }
+          sumErrs.toFloat
+        }
+
+        def evalFroCost(alpha: Float): Float = joinedRays
+          .map{case ( (block,rays),ray) =>  computeSquaredError(block,rays,ray,alpha)}
+          .reduce(_ + _)
+
+        def cost(alpha: Float): Float = {
+           evalFroCost(alpha) 
+           + evalTikhonovNorm(newUser(alpha),userCounts,rank,regParam)
+           + evalTikhonovNorm(newItem(alpha),itemCounts,rank,regParam)
+        }
+
+        var k = 1;
+        var alpha = initStep
+        val f0 = evalFroCost(0);
+        var f = evalFroCost(alpha);
+        logStdout("linesearch: " + k + ":" + f)
+        while ( (f - f0 > alpha*gradFrac*gradientProdDirec) && (k <= maxIters) )
+        {
+          k += 1
+          alpha = alpha * reduceFrac
+          f = evalFroCost(alpha)
+          logStdout("linesearch: " + k + ":" + f)
+        }
+        joinedRays.unpersist()
+        alpha
+      }
+      else 
+      {
+
+        def axpy(a: Float): FacTup = {
+          val u = newUser(a);
+          val i = newItem(a);
+          (u,i)
+        }
+
+        val alpha = linesearch(
+          costFunc,
+          axpy,
+          (userFac,itemFac),
+          (userDirec,itemDirec),
+          reduceFrac,
+          initStep,
+          gradFrac * gradientProdDirec,
+          maxIters
+        )
+        alpha
+      }
       userRay.unpersist()
       itemRay.unpersist()
-
       alpha
     }
         
@@ -955,7 +1044,8 @@ object ALS extends Logging {
         alpha0,
         0.5f,
         0.5f,
-        10
+        10,
+        itemLocalIndexEncoder
       )
       // x_{k+1} = x_k + \alpha * p_k
 
@@ -1868,6 +1958,79 @@ object ALS extends Logging {
     lambda.toFloat * factorNorm
   }
 
+  /*
+      val sumSquaredErr: Float = evalFrobeniusCost(
+        itm, 
+        itm_p, ***
+        usr, 
+        usr_p, ***
+        itemOutBlocks, 
+        userInBlocks, 
+        rank, 
+        regParam,
+        itemLocalIndexEncoder
+      )  
+   */
+
+  private def makeFrobeniusCostRDD[ID](
+      srcFactorBlocks: RDD[(Int, FactorBlock)],
+      srcFactorBlocksDirec: RDD[(Int, FactorBlock)],
+      currentFactorBlocks: RDD[(Int, FactorBlock)],
+      currentFactorBlocksDirec: RDD[(Int, FactorBlock)],
+      srcOutBlocks: RDD[(Int, OutBlock)],
+      dstInBlocks: RDD[(Int, InBlock[ID])],
+      rank: Int
+      ) = 
+  {
+    type Ray = (FactorBlock,FactorBlock)
+    type RaysToSend = Iterable[(Int,Ray)]
+
+    val numSrcBlocks = srcFactorBlocks.partitions.length
+
+    /*type BlockFacTuple = (OutBlock,FactorBlock)*/
+    def filterFactorsToSend (
+        srcBlockId: Int, 
+        tup: (OutBlock, (FactorBlock, FactorBlock) )
+        ) = 
+    {
+      val block = tup._1
+      val x_factors = tup._2._1
+      val p_factors = tup._2._2
+      block
+        .view
+        .zipWithIndex
+        .map{ case (activeIndices, dstBlockId) =>
+          (dstBlockId, (srcBlockId, (activeIndices.map(x_factors(_)), activeIndices.map(p_factors(_))) ))
+        }
+    }
+
+    // Rays are: RDD[(key, (x, p) )]
+    val usrRay: RDD[(Int,Ray)] = srcFactorBlocks.join(srcFactorBlocksDirec)
+
+    val itmRay: RDD[(Int,Ray)] = currentFactorBlocks.join(currentFactorBlocksDirec)
+
+    val srcOut: RDD[(Int, (Array[FactorBlock],Array[FactorBlock]) )] = srcOutBlocks
+      .join(usrRay)
+      .flatMap{case (id,tuple) => filterFactorsToSend(id,tuple)}
+      .groupByKey(new ALSPartitioner(dstInBlocks.partitions.length))
+      .mapValues { iter =>
+        val sortedFactor = new Array[FactorBlock](numSrcBlocks)
+        val sortedFactorDirec = new Array[FactorBlock](numSrcBlocks)
+        iter.foreach{ case (srcBlockId, ray) =>
+            sortedFactor(srcBlockId) = ray._1
+            sortedFactorDirec(srcBlockId) = ray._2
+        }
+        (sortedFactor,sortedFactorDirec)
+      }
+
+    val result: RDD[( (InBlock[ID], (Array[FactorBlock],Array[FactorBlock])),Ray)] = dstInBlocks
+      .join(srcOut)
+      .join(itmRay)
+      .values
+
+    result
+  }
+
   /**
    * Compute the Frobenius norm part of the cost function for the current set of factors 
    *
@@ -1946,7 +2109,7 @@ object ALS extends Logging {
           val srcFactor = sortedSrcFactors(blockId)(localIndex)
           val rating = block.ratings(i)
           val diff = blas.sdot(rank,current(j),1,srcFactor,1) - rating
-          sumErrs += math.pow(diff.toDouble, 2)
+          sumErrs += diff * diff
           i += 1
         }
         j += 1
