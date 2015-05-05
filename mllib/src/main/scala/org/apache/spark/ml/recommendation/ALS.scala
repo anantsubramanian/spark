@@ -528,7 +528,7 @@ object ALS extends Logging {
     var f: Float = func(x)
     var k: Int = 1;
 
-    logStdout("linesearch: " + k + ":" + f)
+    logStdout("linesearch: var: f: " + f)
     while ( (f - f0 > step*dirProdGrad) && (k <= maxIters) )
     {
       // x = a*direc + x0
@@ -538,7 +538,7 @@ object ALS extends Logging {
       k += 1
       logStdout("linesearch: var: f: " + f);
     }
-    logStdout("linesearch:" + (k+1) );
+    logStdout("linesearch: " + (k+1) );
     step
   }
     
@@ -796,7 +796,7 @@ object ALS extends Logging {
     type FacTup = (FactorRDD,FactorRDD) // (user,items)
     def costFunc(x: FacTup): Float =
     {
-      logStdout("costFunc: _init_");
+      /*logStdout("costFunc: _init_");*/
       val usr = x._1
       val itm = x._2
       val sumSquaredErr: Float = evalFrobeniusCost(
@@ -863,16 +863,16 @@ object ALS extends Logging {
         srcEncoder: LocalIndexEncoder
         ): Float = 
     {
-      /*def axpy(a: Float, x: FacTup, y: FacTup): FacTup = {*/
-      /*  (rddAXPY(a,x._1,y._1),rddAXPY(a,x._2,y._2))*/
-      /*}*/
-
       // form RDDs of (key,(x,p)) --- a "ray" with a point and a direction
       val userRay: RDD[(Int, (FactorBlock,FactorBlock))] = userFac.join(userDirec).cache()
+      logStdout("linesearch: var: userRay: " + userRay.count);
       val itemRay: RDD[(Int, (FactorBlock,FactorBlock))] = itemFac.join(itemDirec).cache()
+      logStdout("linesearch: var: itemRay: " + itemRay.count);
 
       val (xx_user,xp_user,pp_user) = evalTikhonovRayNorms(userRay,userCounts,rank,regParam)
+      logStdout("linesearch: var: xx_user: " + xx_user);
       val (xx_item,xp_item,pp_item) = evalTikhonovRayNorms(itemRay,itemCounts,rank,regParam)
+      logStdout("linesearch: var: xx_item: " + xx_item);
 
       def newPoint(a:Float, x: (FactorBlock,FactorBlock) ): FactorBlock = blockAXPY(a,x._2,x._1)
       def newUser(a: Float): FactorRDD = userRay.mapValues{ x => newPoint(a,x) }
@@ -886,12 +886,13 @@ object ALS extends Logging {
       userGrad.unpersist()
       itemGrad.unpersist()
 
-      val useNewCost = true
+      val useNewCost = false
       val alpha = if (useNewCost) 
       {
         type Ray = (FactorBlock,FactorBlock)
         type RaysToSend = Iterable[(Int,Ray)]
 
+        logStdout("linesearch: _init_ joinedRays")
         val joinedRays: RDD[( (InBlock[ID], (Array[FactorBlock],Array[FactorBlock])),Ray)] = 
           makeFrobeniusCostRDD(
             itemFac, 
@@ -902,6 +903,7 @@ object ALS extends Logging {
             userInBlocks, 
             rank
           ).cache()  
+        logStdout("linesearch: var: joinedRays: " + joinedRays.count)
 
         def computeSquaredError(
             block: InBlock[ID], 
@@ -951,42 +953,41 @@ object ALS extends Logging {
           sumErrs.toFloat
         }
 
-        def evalFroCost(alpha: Float): Float = joinedRays
-          .map{case ( (block,rays),ray) =>  computeSquaredError(block,rays,ray,alpha)}
-          .reduce(_ + _)
+        def evalFroCost(alpha: Float): Float = {
+          joinedRays
+            .map{case ( (block,rays),ray) =>  computeSquaredError(block,rays,ray,alpha)}
+            .reduce(_ + _)
+        }
 
         def cost(alpha: Float): Float = {
+          logStdout("costFunc: _init_");
           val sumSquaredErr = evalFroCost(alpha) 
-          /*val usrNorm = evalTikhonovNorm(newUser(alpha),userCounts,rank,regParam)*/
-          /*val itmNorm = evalTikhonovNorm(newItem(alpha),itemCounts,rank,regParam)*/
+          logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr);
           val usrNorm = xx_user + alpha * (2*xp_user + alpha*pp_user)
           val itmNorm = xx_item + alpha * (2*xp_item + alpha*pp_item)
-
-          logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)
-          logStdout("costFunc: var: usrNorm: " + usrNorm)
-          logStdout("costFunc: var: itmNorm: " + itmNorm)
           (sumSquaredErr + usrNorm + itmNorm)
         }
 
-        var k = 1;
+        var k = 0;
         var alpha = initStep
-        val f0 = cost(0);
+        val f0 = cost(0f);
+        logStdout("linesearch: var: f: " + f0)
         var f = cost(alpha);
-        logStdout("linesearch: " + k + ":" + f0)
-        logStdout("linesearch: " + k + ":" + f)
+        logStdout("linesearch: var: f: " + f)
         while ( (f - f0 > alpha*gradFrac*gradientProdDirec) && (k <= maxIters) )
         {
           k += 1
           alpha = alpha * reduceFrac
           f = cost(alpha)
-          logStdout("linesearch: " + k + ":" + f)
+          logStdout("linesearch: var: f: " + f)
         }
+        // print the number of calls made to cost(alpha)
+        logStdout("linesearch: " + (k+2))
         joinedRays.unpersist()
         alpha
       }
       else 
       {
-
         def axpy(a: Float): FacTup = {
           val u = newUser(a);
           val i = newItem(a);
