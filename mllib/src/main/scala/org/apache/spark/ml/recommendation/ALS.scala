@@ -867,6 +867,9 @@ object ALS extends Logging {
       val userRay: RDD[(Int, (FactorBlock,FactorBlock))] = userFac.join(userDirec).cache()
       val itemRay: RDD[(Int, (FactorBlock,FactorBlock))] = itemFac.join(itemDirec).cache()
 
+      val (xx_user,xp_user,pp_user) = evalTikhonovRayNorms(userRay,userCounts,rank,regParam)
+      val (xx_item,xp_item,pp_item) = evalTikhonovRayNorms(itemRay,itemCounts,rank,regParam)
+
       def newPoint(a:Float, x: (FactorBlock,FactorBlock) ): FactorBlock = blockAXPY(a,x._2,x._1)
       def newUser(a: Float): FactorRDD = userRay.mapValues{ x => newPoint(a,x) }
       def newItem(a: Float): FactorRDD = itemRay.mapValues{ x => newPoint(a,x) }
@@ -877,7 +880,7 @@ object ALS extends Logging {
       userGrad.unpersist()
       itemGrad.unpersist()
 
-      val useNewCost = false
+      val useNewCost = true
       val alpha = if (useNewCost) 
       {
         type Ray = (FactorBlock,FactorBlock)
@@ -919,14 +922,21 @@ object ALS extends Logging {
               val srcFactor = sortedSrcFactors(blockId)(localIndex)
               val srcDirec = sortedSrcFactorDirecs(blockId)(localIndex)
 
-              val x = srcFactor.clone()
-              blas.saxpy(rank,alpha,srcDirec,1,x,1)
-
-              val x_cur = currentFactors(j).clone()
-              blas.saxpy(rank,alpha,currentFactorDirecs(j),1,x_cur,1)
+              // step in srcDirection if alpha is nonzero
+              val prediction = if (alpha == 0f) {
+                blas.sdot(rank,srcFactor,1,currentFactors(j),1)
+              }
+              else
+              {
+                val x = srcFactor.clone()
+                val x_cur = currentFactors(j).clone()
+                blas.saxpy(rank,alpha,srcDirec,1,x,1)
+                blas.saxpy(rank,alpha,currentFactorDirecs(j),1,x_cur,1)
+                blas.sdot(rank,x,1,x_cur,1)
+              }
 
               val rating = block.ratings(i)
-              val diff = blas.sdot(rank,x,1,x_cur,1) - rating
+              val diff = prediction - rating
               sumErrs += diff * diff
               i += 1
             }
@@ -941,11 +951,14 @@ object ALS extends Logging {
 
         def cost(alpha: Float): Float = {
           val sumSquaredErr = evalFroCost(alpha) 
-          val usrNorm = evalTikhonovNorm(newUser(alpha),userCounts,rank,regParam)
-          val itmNorm = evalTikhonovNorm(newItem(alpha),itemCounts,rank,regParam)
-          /*logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)*/
-          /*logStdout("costFunc: var: usrNorm: " + usrNorm)*/
-          /*logStdout("costFunc: var: itmNorm: " + itmNorm)*/
+          /*val usrNorm = evalTikhonovNorm(newUser(alpha),userCounts,rank,regParam)*/
+          /*val itmNorm = evalTikhonovNorm(newItem(alpha),itemCounts,rank,regParam)*/
+          val usrNorm = xx_user + alpha * (2*xp_user + alpha*pp_user)
+          val itmNorm = xx_item + alpha * (2*xp_item + alpha*pp_item)
+
+          logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)
+          logStdout("costFunc: var: usrNorm: " + usrNorm)
+          logStdout("costFunc: var: itmNorm: " + itmNorm)
           (sumSquaredErr + usrNorm + itmNorm)
         }
 
@@ -1918,6 +1931,45 @@ object ALS extends Logging {
       /*  computeGradientBlock(block.head,factorTuple.head,fac.head)*/
       /*}*/
     gradient
+  }
+
+  private def evalTikhonovRayNorms(
+      ray: RDD[(Int, (FactorBlock,FactorBlock))],
+      counts: RDD[(Int, Array[Float])],
+      rank: Int,
+      lambda: Double
+      ): (Float,Float,Float) = 
+  {
+    def evalBlockNorms(x: FactorBlock, p: FactorBlock): (Array[Float],Array[Float],Array[Float]) = 
+    {
+      val numFactors: Int = x.length
+      val xTx: Array[Float] = new Array[Float](numFactors)
+      val xTp: Array[Float] = new Array[Float](numFactors)
+      val pTp: Array[Float] = new Array[Float](numFactors)
+      var j: Int = 0
+      while (j < numFactors) {
+        xTx(j) = blas.sdot(rank,x(j),1,x(j),1)
+        xTp(j) = blas.sdot(rank,x(j),1,p(j),1)
+        pTp(j) = blas.sdot(rank,p(j),1,p(j),1)
+        /*logStdout("dot" + j + " = " + result(j))*/
+        j += 1
+      }
+      (xTx,xTp,pTp)
+    }
+    def scaleByNumRatings(factorNorms: Array[Float], numRatings: Array[Float]): Float =
+    {
+      val numFactors: Int = factorNorms.length
+      blas.sdot(numFactors,factorNorms,1,numRatings,1)
+    }
+
+    val factorNorms: (Float,Float,Float) = ray
+      .mapValues{ case(x,p) => evalBlockNorms(x,p) }
+      .join(counts)
+      .map{case (key,((xx,xp,pp),n)) => (scaleByNumRatings(xx,n),scaleByNumRatings(xp,n),scaleByNumRatings(pp,n)) }
+      .reduce{ (x,y) => (x._1+y._1, x._2+y._2, x._3 + y._3) }
+
+    val lam = lambda.toFloat
+    (factorNorms._1 * lam, factorNorms._2 * lam, factorNorms._3 * lam)
   }
 
   /**
