@@ -886,11 +886,10 @@ object ALS extends Logging {
       userGrad.unpersist()
       itemGrad.unpersist()
 
-      val useNewCost = false
+      val useNewCost = true
       val alpha = if (useNewCost) 
       {
         type Ray = (FactorBlock,FactorBlock)
-        type RaysToSend = Iterable[(Int,Ray)]
 
         logStdout("linesearch: _init_ joinedRays")
         val joinedRays: RDD[( (InBlock[ID], (Array[FactorBlock],Array[FactorBlock])),Ray)] = 
@@ -2088,7 +2087,6 @@ object ALS extends Logging {
       rank: Int) = 
   {
     type Ray = (FactorBlock,FactorBlock)
-    type RaysToSend = Iterable[(Int,Ray)]
 
     val numSrcBlocks = srcFactorBlocks.partitions.length
 
