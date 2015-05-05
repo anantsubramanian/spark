@@ -796,7 +796,7 @@ object ALS extends Logging {
     type FacTup = (FactorRDD,FactorRDD) // (user,items)
     def costFunc(x: FacTup): Float =
     {
-      /*logStdout("costFunc: _init_");*/
+      logStdout("costFunc: _init_");
       val usr = x._1
       val itm = x._2
       val sumSquaredErr: Float = evalFrobeniusCost(
@@ -808,7 +808,7 @@ object ALS extends Logging {
         regParam,
         itemLocalIndexEncoder
       )  
-      /*logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)*/
+      logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)
       val usrNorm: Float = evalTikhonovNorm(
         usr, 
         userCounts,
@@ -904,6 +904,56 @@ object ALS extends Logging {
           ).cache()  
         logStdout("linesearch: var: joinedRays: " + joinedRays.count)
 
+        def computeSquaredErrorFlat(
+            block: InBlock[ID], 
+            /*factorList: Iterable[(Int,FactorBlock)],*/
+            sortedRays: (Array[FactorBlock],Array[FactorBlock]),
+            current: Ray): Array[Float] = 
+        {
+          val currentFactors = current._1
+          val currentFactorDirecs = current._2
+          val sortedSrcFactors = sortedRays._1
+          val sortedSrcFactorDirecs = sortedRays._2
+          val len = block.srcIds.length
+          var j = 0
+
+          val coeff: Array[Float] = Array.ofDim(5)
+
+          while (j < len) 
+          {
+            val y = currentFactors(j)
+            val q = currentFactorDirecs(j)
+            var i = block.dstPtrs(j)
+
+            while (i < block.dstPtrs(j + 1)) {
+              val encoded = block.dstEncodedIndices(i)
+              val blockId = srcEncoder.blockId(encoded)
+              val localIndex = srcEncoder.localIndex(encoded)
+
+              val x = sortedSrcFactors(blockId)(localIndex)
+              val p = sortedSrcFactorDirecs(blockId)(localIndex)
+
+              val xy = blas.sdot(rank,x,1,y,1)
+              val xq = blas.sdot(rank,x,1,q,1)
+              val py = blas.sdot(rank,p,1,y,1)
+              val pq = blas.sdot(rank,p,1,q,1)
+              val r = block.ratings(i)
+
+              // avoid catastrophic cancellation where possible:
+              // don't compute (xy - r) in coeff(0) or coeff(2)
+              coeff(0) += (xy*xy  - 2*xy*r) + r*r
+              coeff(1) += 2*(xq + py)*(xy - r)
+              coeff(2) += 2*pq*xy + xq*xq + py*(py + 2*xq) - 2*r*pq
+              coeff(3) += 2*pq*(xq + py)
+              coeff(4) += pq*pq
+
+              i += 1
+            }
+            j += 1
+          }
+          coeff
+        }
+
         def computeSquaredError(
             block: InBlock[ID], 
             /*factorList: Iterable[(Int,FactorBlock)],*/
@@ -920,7 +970,10 @@ object ALS extends Logging {
           var sumErrs: Double = 0
           while (j < len) 
           {
+            val x_cur = currentFactors(j).clone()
+            val p_cur = currentFactorDirecs(j)
             var i = block.dstPtrs(j)
+
             while (i < block.dstPtrs(j + 1)) {
               val encoded = block.dstEncodedIndices(i)
               val blockId = srcEncoder.blockId(encoded)
@@ -936,9 +989,8 @@ object ALS extends Logging {
               else
               {
                 val x = srcFactor.clone()
-                val x_cur = currentFactors(j).clone()
                 blas.saxpy(rank,alpha,srcDirec,1,x,1)
-                blas.saxpy(rank,alpha,currentFactorDirecs(j),1,x_cur,1)
+                blas.saxpy(rank,alpha,p_cur,1,x_cur,1)
                 blas.sdot(rank,x,1,x_cur,1)
               }
 
@@ -952,6 +1004,19 @@ object ALS extends Logging {
           sumErrs.toFloat
         }
 
+        val costCoeffs: Array[Float] = joinedRays
+          .map{case ( (block,rays),ray) =>  computeSquaredErrorFlat(block,rays,ray)}
+          .reduce{ (x,y) => 
+            val p = y.clone
+            blas.saxpy(5,1.0f,x,1,p,1)
+            p
+           }
+
+        def polyCostFunc(alpha: Float): Float = {
+          val powers = Array.range(0,5).map(math.pow(alpha,_).toFloat)
+          blas.sdot(5,powers,1,costCoeffs,1)
+        }
+
         def evalFroCost(alpha: Float): Float = {
           joinedRays
             .map{case ( (block,rays),ray) =>  computeSquaredError(block,rays,ray,alpha)}
@@ -960,7 +1025,8 @@ object ALS extends Logging {
 
         def cost(alpha: Float): Float = {
           logStdout("costFunc: _init_");
-          val sumSquaredErr = evalFroCost(alpha) 
+          /*val sumSquaredErr = evalFroCost(alpha) */
+          val sumSquaredErr = polyCostFunc(alpha) 
           logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr);
           val usrNorm = xx_user + alpha * (2*xp_user + alpha*pp_user)
           val itmNorm = xx_item + alpha * (2*xp_item + alpha*pp_item)
