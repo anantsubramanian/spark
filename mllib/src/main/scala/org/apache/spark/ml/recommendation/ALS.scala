@@ -526,13 +526,15 @@ object ALS extends Logging {
     var f: Float = func(x)
     var k: Int = 1;
 
+    logStdout("linesearch: " + k + ":" + f0)
+    logStdout("linesearch: " + k + ":" + f)
     while ( (f - f0 > step*dirProdGrad) && (k <= maxIters) )
     {
-      // x = a*direc + x0
+      k += 1
       step = reduceFrac * step
       x = axpy(step)
       f = func(x)
-      k += 1
+      logStdout("linesearch: " + k + ":" + f)
     }
     step
   }
@@ -727,9 +729,9 @@ object ALS extends Logging {
       var k = 0
       while (k < numVectors)
       {
-        /*norm = blas.snrm2(rank,x(k),1)*/
-        /*result += norm * norm*/
-        result += blas.sdot(rank,x(k),1,x(k),1)
+        norm = blas.snrm2(rank,x(k),1)
+        result += norm * norm
+        /*result += blas.sdot(rank,x(k),1,x(k),1)*/
         k += 1
       }
       result
@@ -802,18 +804,22 @@ object ALS extends Logging {
         regParam,
         itemLocalIndexEncoder
       )  
+      /*logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)*/
       val usrNorm: Float = evalTikhonovNorm(
         usr, 
         userCounts,
         rank,
         regParam
       ) 
+      /*logStdout("costFunc: var: usrNorm: " + usrNorm)*/
       val itmNorm: Float = evalTikhonovNorm(
         itm, 
         itemCounts,
         rank,
         regParam
       )
+      /*logStdout("costFunc: var: itmNorm: " + itmNorm)*/
+      /*logStdout("costFunc: " + (sumSquaredErr + usrNorm + itmNorm))*/
       sumSquaredErr + usrNorm + itmNorm
     }
 
@@ -871,7 +877,7 @@ object ALS extends Logging {
       userGrad.unpersist()
       itemGrad.unpersist()
 
-      val useNewCost = true
+      val useNewCost = false
       val alpha = if (useNewCost) 
       {
         type Ray = (FactorBlock,FactorBlock)
@@ -909,6 +915,7 @@ object ALS extends Logging {
               val encoded = block.dstEncodedIndices(i)
               val blockId = srcEncoder.blockId(encoded)
               val localIndex = srcEncoder.localIndex(encoded)
+
               val srcFactor = sortedSrcFactors(blockId)(localIndex)
               val srcDirec = sortedSrcFactorDirecs(blockId)(localIndex)
 
@@ -933,21 +940,26 @@ object ALS extends Logging {
           .reduce(_ + _)
 
         def cost(alpha: Float): Float = {
-           evalFroCost(alpha) 
-           + evalTikhonovNorm(newUser(alpha),userCounts,rank,regParam)
-           + evalTikhonovNorm(newItem(alpha),itemCounts,rank,regParam)
+          val sumSquaredErr = evalFroCost(alpha) 
+          val usrNorm = evalTikhonovNorm(newUser(alpha),userCounts,rank,regParam)
+          val itmNorm = evalTikhonovNorm(newItem(alpha),itemCounts,rank,regParam)
+          /*logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr)*/
+          /*logStdout("costFunc: var: usrNorm: " + usrNorm)*/
+          /*logStdout("costFunc: var: itmNorm: " + itmNorm)*/
+          (sumSquaredErr + usrNorm + itmNorm)
         }
 
         var k = 1;
         var alpha = initStep
-        val f0 = evalFroCost(0);
-        var f = evalFroCost(alpha);
+        val f0 = cost(0);
+        var f = cost(alpha);
+        logStdout("linesearch: " + k + ":" + f0)
         logStdout("linesearch: " + k + ":" + f)
         while ( (f - f0 > alpha*gradFrac*gradientProdDirec) && (k <= maxIters) )
         {
           k += 1
           alpha = alpha * reduceFrac
-          f = evalFroCost(alpha)
+          f = cost(alpha)
           logStdout("linesearch: " + k + ":" + f)
         }
         joinedRays.unpersist()
@@ -1929,7 +1941,7 @@ object ALS extends Logging {
       val result: Array[Float] = new Array[Float](numFactors)
       var j: Int = 0
       while (j < numFactors) {
-        result(j)= blas.sdot(rank,block(j),1,block(j),1)
+        result(j) = blas.sdot(rank,block(j),1,block(j),1)
         /*logStdout("dot" + j + " = " + result(j))*/
         j += 1
       }
@@ -1979,8 +1991,7 @@ object ALS extends Logging {
       currentFactorBlocksDirec: RDD[(Int, FactorBlock)],
       srcOutBlocks: RDD[(Int, OutBlock)],
       dstInBlocks: RDD[(Int, InBlock[ID])],
-      rank: Int
-      ) = 
+      rank: Int) = 
   {
     type Ray = (FactorBlock,FactorBlock)
     type RaysToSend = Iterable[(Int,Ray)]
