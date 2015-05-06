@@ -1106,9 +1106,7 @@ object ALS extends Logging {
 
       gu.unpersist()
       gi.unpersist()
-      logStdout("PNCG: " + iter + ":" + beta_pncg)
-
-      /*logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )*/
+      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
     }
 
     val userIdAndFactors = userInBlocks
@@ -1187,11 +1185,133 @@ object ALS extends Logging {
     // materialize item blocks
     itemCounts.count()
     itemOutBlocks.count()
+
     val seedGen = new XORShiftRandom(seed)
     var userFactors = initialize(userInBlocks, rank, seedGen.nextLong()).cache()
-    var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong())
+    var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong()).cache()
 
-    logStdout("ALS:" + 0 +": "+ (userFactors.count + itemFactors.count) )
+    //*==============================================
+    //* can delete between here and loop
+    //*==============================================
+    type FactorRDD = RDD[(Int,FactorBlock)]
+
+    /** 
+     * compute x dot y, and return a scalar
+     * @param x a vector represented as a FactorBlock
+     * @param y a vector represented as a FactorBlock
+     */
+    def blockDOT(x: FactorBlock, y: FactorBlock): Float = 
+    {
+      val numVectors = x.length
+      var result: Float = 0.0f
+      var k = 0
+      while (k < numVectors)
+      {
+        result += blas.sdot(rank,x(k),1,y(k),1)
+        k += 1
+      }
+      result
+    }
+    /** 
+     * compute x dot x, and return a scalar
+     * @param x a vector represented as a FactorBlock
+     */
+    def blockNRMSQR(x: FactorBlock): Float = 
+    {
+      val numVectors = x.length
+      var result: Float = 0.0f
+      var norm: Float = 0.0f
+      var k = 0
+      while (k < numVectors)
+      {
+        norm = blas.snrm2(rank,x(k),1)
+        result += norm * norm
+        k += 1
+      }
+      result
+    }
+
+    /** 
+     * compute dot product, and return a scalar
+     * @param xs RDD of FactorBlocks
+     * @param ys RDD of FactorBlocks
+     */
+    def rddDOT(xs: FactorRDD, ys: FactorRDD): Float = {
+      xs.join(ys)
+        .map{case (_,(x,y)) => blockDOT(x,y)}
+        .reduce{_+_}
+    }
+
+
+    /** 
+     * compute x dot x, and return a scalar
+     * @param xs RDD of FactorBlocks
+     */
+    def rddNORMSQR(xs: FactorRDD): Float = {
+      xs.map{case (_,x) => blockNRMSQR(x)}
+        .reduce(_+_)
+    }
+
+    /** 
+     * compute 2-norm of an RDD of FactorBlocks
+     * @param xs RDD of FactorBlocks
+     */
+    def rddNORM2(xs: FactorRDD): Float = {
+      math.sqrt(rddNORMSQR(xs).toDouble).toFloat
+    }
+
+    type FacTup = (FactorRDD,FactorRDD) // (user,items)
+    def costFunc(x: FacTup): Float =
+    {
+      val usr = x._1
+      val itm = x._2
+      val sumSquaredErr: Float = evalFrobeniusCost(
+        itm, 
+        usr, 
+        itemOutBlocks, 
+        userInBlocks, 
+        rank, 
+        regParam,
+        itemLocalIndexEncoder
+      )  
+      val usrNorm: Float = evalTikhonovNorm(
+        usr, 
+        userCounts,
+        rank,
+        regParam
+      ) 
+      val itmNorm: Float = evalTikhonovNorm(
+        itm, 
+        itemCounts,
+        rank,
+        regParam
+      )
+      sumSquaredErr + usrNorm + itmNorm
+    }
+
+    logStdout("ALS: f(u,m): ||g||^2")
+
+    val gu = evalGradient(
+      itemFactors, 
+      userFactors,
+      itemOutBlocks, 
+      userInBlocks, 
+      rank, 
+      regParam,
+      itemLocalIndexEncoder
+    )
+    val gm = evalGradient(
+      userFactors,
+      itemFactors, 
+      userOutBlocks, 
+      itemInBlocks, 
+      rank, 
+      regParam,
+      userLocalIndexEncoder
+    )
+
+    logStdout("ALS:" + 0 +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
+
     if (implicitPrefs) {
       for (iter <- 1 to maxIter+1) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1211,7 +1331,7 @@ object ALS extends Logging {
     } else {
       for (iter <- 1 until maxIter+1) {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
-          userLocalIndexEncoder, solver = solver)
+          userLocalIndexEncoder, solver = solver).cache()
         if (sc.checkpointDir.isDefined && (iter % 15 == 0))
         {
           logStdout("Checkpointing at iter " + iter)
@@ -1219,9 +1339,27 @@ object ALS extends Logging {
           itemFactors.count()
         }
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
-          itemLocalIndexEncoder, solver = solver)
+          itemLocalIndexEncoder, solver = solver).cache()
 
-        logStdout("ALS: " + iter + ":" + userFactors.count) 
+        val gu = evalGradient(
+          itemFactors, 
+          userFactors,
+          itemOutBlocks, 
+          userInBlocks, 
+          rank, 
+          regParam,
+          itemLocalIndexEncoder
+        )
+        val gm = evalGradient(
+          userFactors,
+          itemFactors, 
+          userOutBlocks, 
+          itemInBlocks, 
+          rank, 
+          regParam,
+          userLocalIndexEncoder
+        )
+        logStdout("ALS:" + iter +": "+ costFunc((userFactors,itemFactors)) +": "+ (rddNORMSQR(gu) + rddNORMSQR(gm)) )
       }
     }
     val userIdAndFactors = userInBlocks
