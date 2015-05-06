@@ -962,18 +962,18 @@ object ALS extends Logging {
       var k = 0;
       var alpha = initStep
       val f0 = cost(0f);
-      logStdout("linesearch: var: f: " + f0)
+      /*logStdout("linesearch: var: f: " + f0)*/
       var f = cost(alpha);
-      logStdout("linesearch: var: f: " + f)
+      /*logStdout("linesearch: var: f: " + f)*/
       while ( (f - f0 > alpha*gradFrac*gradientProdDirec) && (k <= maxIters) )
       {
         k += 1
         alpha = alpha * reduceFrac
         f = cost(alpha)
-        logStdout("linesearch: var: f: " + f)
+        /*logStdout("linesearch: var: f: " + f)*/
       }
       // print the number of calls made to cost(alpha)
-      logStdout("linesearch: " + (k+2))
+      /*logStdout("linesearch: " + (k+2))*/
 
       userRay.unpersist()
       itemRay.unpersist()
@@ -1013,11 +1013,13 @@ object ALS extends Logging {
 
     // compute g^T * g
     // make variable for the actual gradient ---bad naming, I know. Have to fix this
+
     val (gu,gi) = computeGradient(users,items,persist=false)
     var gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
+    /*var gradTgrad = (rddNORMSQR(gradUser) + rddNORMSQR(gradItem));*/
     var gradTgrad_old = gradTgrad;
 
-    val alpha_max: Float = 5.0f
+    val alpha_max: Float = 10.0f
     var beta_pncg: Float = gradTgrad
     var alpha_pncg: Float = alpha_max
     val checkpointInterval: Int = 15 
@@ -1040,7 +1042,7 @@ object ALS extends Logging {
         direcItem,
         alpha0,
         0.9f,
-        0.1f,
+        0.5f,
         200,
         itemLocalIndexEncoder
       )
@@ -1079,6 +1081,7 @@ object ALS extends Logging {
       beta_pncg = {
         if (gradTgrad_old > 0.0f)
           (gradTgrad - (rddDOT(gu,gradUser_old) + rddDOT(gi,gradItem_old)) ) / gradTgrad_old
+          /*(gradTgrad - (rddDOT(gradUser,gradUser_old) + rddDOT(gradItem,gradItem_old)) ) / gradTgrad_old*/
         else
         {
           logStdout("PNCG: Restarting in steepest descent direction; beta = 0")
@@ -1104,9 +1107,9 @@ object ALS extends Logging {
       gradUser_old = gradUser
       gradItem_old = gradItem
 
+      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
       gu.unpersist()
       gi.unpersist()
-      logStdout("PNCG: "+ iter+": "+alpha_pncg+": "+beta_pncg+": " + (rddNORMSQR(gu)+rddNORMSQR(gi))+ ": " + costFunc((users,items)) )
     }
 
     val userIdAndFactors = userInBlocks
