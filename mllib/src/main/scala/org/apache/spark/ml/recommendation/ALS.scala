@@ -863,6 +863,8 @@ object ALS extends Logging {
         srcEncoder: LocalIndexEncoder
         ): Float = 
     {
+      val useNewCost = true
+
       // form RDDs of (key,(x,p)) --- a "ray" with a point and a direction
       val userRay: RDD[(Int, (FactorBlock,FactorBlock))] = userFac.join(userDirec).cache()
       logStdout("linesearch: var: userRay: " + userRay.count);
@@ -882,7 +884,6 @@ object ALS extends Logging {
       userGrad.unpersist()
       itemGrad.unpersist()
 
-      val useNewCost = true
       val alpha = if (useNewCost) 
       {
         type Ray = (FactorBlock,FactorBlock)
