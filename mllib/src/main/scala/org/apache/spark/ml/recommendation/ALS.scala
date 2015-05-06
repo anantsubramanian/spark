@@ -874,10 +874,6 @@ object ALS extends Logging {
       val (xx_item,xp_item,pp_item) = evalTikhonovRayNorms(itemRay,itemCounts,rank,regParam)
       logStdout("linesearch: var: xx_item: " + xx_item);
 
-      def newPoint(a:Float, x: (FactorBlock,FactorBlock) ): FactorBlock = blockAXPY(a,x._2,x._1)
-      def newUser(a: Float): FactorRDD = userRay.mapValues{ x => newPoint(a,x) }
-      def newItem(a: Float): FactorRDD = itemRay.mapValues{ x => newPoint(a,x) }
-
       val (userGrad,itemGrad) = computeGradient(userFac,itemFac)
       logStdout("linesearch: var: gu: " + userGrad.count);
       logStdout("linesearch: var: gi: " + itemGrad.count);
@@ -891,22 +887,8 @@ object ALS extends Logging {
       {
         type Ray = (FactorBlock,FactorBlock)
 
-        logStdout("linesearch: _init_ joinedRays")
-        val joinedRays: RDD[( (InBlock[ID], (Array[FactorBlock],Array[FactorBlock])),Ray)] = 
-          makeFrobeniusCostRDD(
-            itemFac, 
-            itemDirec,
-            userFac, 
-            userDirec,
-            itemOutBlocks, 
-            userInBlocks, 
-            rank
-          ).cache()  
-        logStdout("linesearch: var: joinedRays: " + joinedRays.count)
-
         def computeSquaredErrorFlat(
             block: InBlock[ID], 
-            /*factorList: Iterable[(Int,FactorBlock)],*/
             sortedRays: (Array[FactorBlock],Array[FactorBlock]),
             current: Ray): Array[Float] = 
         {
@@ -933,6 +915,7 @@ object ALS extends Logging {
               val x = sortedSrcFactors(blockId)(localIndex)
               val p = sortedSrcFactorDirecs(blockId)(localIndex)
 
+              // compute the necessary dot products
               val xy = blas.sdot(rank,x,1,y,1)
               val xq = blas.sdot(rank,x,1,q,1)
               val py = blas.sdot(rank,p,1,y,1)
@@ -954,80 +937,33 @@ object ALS extends Logging {
           coeff
         }
 
-        def computeSquaredError(
-            block: InBlock[ID], 
-            /*factorList: Iterable[(Int,FactorBlock)],*/
-            sortedRays: (Array[FactorBlock],Array[FactorBlock]),
-            current: Ray,
-            alpha: Float): Float = 
-        {
-          val currentFactors = current._1
-          val currentFactorDirecs = current._2
-          val sortedSrcFactors = sortedRays._1
-          val sortedSrcFactorDirecs = sortedRays._2
-          val len = block.srcIds.length
-          var j = 0
-          var sumErrs: Double = 0
-          while (j < len) 
-          {
-            val x_cur = currentFactors(j).clone()
-            val p_cur = currentFactorDirecs(j)
-            var i = block.dstPtrs(j)
-
-            while (i < block.dstPtrs(j + 1)) {
-              val encoded = block.dstEncodedIndices(i)
-              val blockId = srcEncoder.blockId(encoded)
-              val localIndex = srcEncoder.localIndex(encoded)
-
-              val srcFactor = sortedSrcFactors(blockId)(localIndex)
-              val srcDirec = sortedSrcFactorDirecs(blockId)(localIndex)
-
-              // step in srcDirection if alpha is nonzero
-              val prediction = if (alpha == 0f) {
-                blas.sdot(rank,srcFactor,1,currentFactors(j),1)
-              }
-              else
-              {
-                val x = srcFactor.clone()
-                blas.saxpy(rank,alpha,srcDirec,1,x,1)
-                blas.saxpy(rank,alpha,p_cur,1,x_cur,1)
-                blas.sdot(rank,x,1,x_cur,1)
-              }
-
-              val rating = block.ratings(i)
-              val diff = prediction - rating
-              sumErrs += diff * diff
-              i += 1
-            }
-            j += 1
-          }
-          sumErrs.toFloat
-        }
-
-        val costCoeffs: Array[Float] = joinedRays
+        logStdout("linesearch: _init_ costCoeffs")
+        val costCoeffs: Array[Float] = makeFrobeniusCostRDD(
+            itemFac, 
+            itemDirec,
+            userFac, 
+            userDirec,
+            itemOutBlocks, 
+            userInBlocks, 
+            rank
+          )
           .map{case ( (block,rays),ray) =>  computeSquaredErrorFlat(block,rays,ray)}
           .reduce{ (x,y) => 
             val p = y.clone
             blas.saxpy(5,1.0f,x,1,p,1)
             p
            }
+        logStdout("linesearch: var: costCoeffs: " + costCoeffs(0))
+
 
         def polyCostFunc(alpha: Float): Float = {
           val powers = Array.range(0,5).map(math.pow(alpha,_).toFloat)
           blas.sdot(5,powers,1,costCoeffs,1)
         }
 
-        def evalFroCost(alpha: Float): Float = {
-          joinedRays
-            .map{case ( (block,rays),ray) =>  computeSquaredError(block,rays,ray,alpha)}
-            .reduce(_ + _)
-        }
-
         def cost(alpha: Float): Float = {
           logStdout("costFunc: _init_");
-          /*val sumSquaredErr = evalFroCost(alpha) */
           val sumSquaredErr = polyCostFunc(alpha) 
-          logStdout("costFunc: var: sumSquaredErr: " + sumSquaredErr);
           val usrNorm = xx_user + alpha * (2*xp_user + alpha*pp_user)
           val itmNorm = xx_item + alpha * (2*xp_item + alpha*pp_item)
           (sumSquaredErr + usrNorm + itmNorm)
@@ -1048,11 +984,13 @@ object ALS extends Logging {
         }
         // print the number of calls made to cost(alpha)
         logStdout("linesearch: " + (k+2))
-        joinedRays.unpersist()
         alpha
       }
       else 
       {
+        def newPoint(a:Float, x: (FactorBlock,FactorBlock) ): FactorBlock = blockAXPY(a,x._2,x._1)
+        def newUser(a: Float): FactorRDD = userRay.mapValues{ x => newPoint(a,x) }
+        def newItem(a: Float): FactorRDD = itemRay.mapValues{ x => newPoint(a,x) }
         def axpy(a: Float): FacTup = {
           val u = newUser(a);
           val i = newItem(a);
