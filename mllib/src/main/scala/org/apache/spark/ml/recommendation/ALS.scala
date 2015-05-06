@@ -962,18 +962,18 @@ object ALS extends Logging {
       var k = 0;
       var alpha = initStep
       val f0 = cost(0f);
-      logStdout("linesearch: var: f: " + f0)
+      /*logStdout("linesearch: var: f: " + f0)*/
       var f = cost(alpha);
-      logStdout("linesearch: var: f: " + f)
+      /*logStdout("linesearch: var: f: " + f)*/
       while ( (f - f0 > alpha*gradFrac*gradientProdDirec) && (k <= maxIters) )
       {
         k += 1
         alpha = alpha * reduceFrac
         f = cost(alpha)
-        logStdout("linesearch: var: f: " + f)
+        /*logStdout("linesearch: var: f: " + f)*/
       }
       // print the number of calls made to cost(alpha)
-      logStdout("linesearch: " + (k+2))
+      /*logStdout("linesearch: " + (k+2))*/
 
       userRay.unpersist()
       itemRay.unpersist()
@@ -1017,7 +1017,7 @@ object ALS extends Logging {
     var gradTgrad = rddDOT(gu,gradUser) + rddDOT(gi,gradItem);
     var gradTgrad_old = gradTgrad;
 
-    val alpha_max: Float = 5.0f
+    val alpha_max: Float = 10.0f
     var beta_pncg: Float = gradTgrad
     var alpha_pncg: Float = alpha_max
     val checkpointInterval: Int = 15 
@@ -1040,7 +1040,7 @@ object ALS extends Logging {
         direcItem,
         alpha0,
         0.9f,
-        0.1f,
+        0.5f,
         200,
         itemLocalIndexEncoder
       )
@@ -1191,7 +1191,7 @@ object ALS extends Logging {
     var userFactors = initialize(userInBlocks, rank, seedGen.nextLong()).cache()
     var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong())
 
-    logStdout("ALS:" + 0 +": "+ (userFactors.count + itemFactors.count) )
+    logStdout("ALS:" + 0 +": "+ (userFactors.count) )
     if (implicitPrefs) {
       for (iter <- 1 to maxIter+1) {
         userFactors.setName(s"userFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1218,8 +1218,9 @@ object ALS extends Logging {
           itemFactors.checkpoint()
           itemFactors.count()
         }
+        // cache this so that the print statement/computeFactors in next iter doesn't cause recomputation
         userFactors = computeFactors(itemFactors, itemOutBlocks, userInBlocks, rank, regParam,
-          itemLocalIndexEncoder, solver = solver)
+          itemLocalIndexEncoder, solver = solver).cache()
 
         logStdout("ALS: " + iter + ":" + userFactors.count) 
       }
