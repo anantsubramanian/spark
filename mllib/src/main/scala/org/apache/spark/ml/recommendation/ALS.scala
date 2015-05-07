@@ -1190,6 +1190,7 @@ object ALS extends Logging {
     val seedGen = new XORShiftRandom(seed)
     var userFactors = initialize(userInBlocks, rank, seedGen.nextLong()).cache()
     var itemFactors = initialize(itemInBlocks, rank, seedGen.nextLong())
+    val checkpointInterval = 15
 
     logStdout("ALS:" + 0 +": "+ (userFactors.count) )
     if (implicitPrefs) {
@@ -1199,7 +1200,7 @@ object ALS extends Logging {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
           userLocalIndexEncoder, implicitPrefs, alpha, solver)
         previousItemFactors.unpersist()
-        if (sc.checkpointDir.isDefined && (iter % 15 == 0)) {
+        if (sc.checkpointDir.isDefined && (iter % checkpointInterval == 0)) {
           itemFactors.checkpoint()
         }
         itemFactors.setName(s"itemFactors-$iter").persist(intermediateRDDStorageLevel)
@@ -1212,7 +1213,7 @@ object ALS extends Logging {
       for (iter <- 1 until maxIter+1) {
         itemFactors = computeFactors(userFactors, userOutBlocks, itemInBlocks, rank, regParam,
           userLocalIndexEncoder, solver = solver)
-        if (sc.checkpointDir.isDefined && (iter % 15 == 0))
+        if (sc.checkpointDir.isDefined && (iter % checkpointInterval == 0))
         {
           logStdout("Checkpointing at iter " + iter)
           itemFactors.checkpoint()
